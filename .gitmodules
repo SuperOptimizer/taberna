@@ -1,0 +1,12 @@
+[submodule "third-party/libs3"]
+	path = third-party/libs3
+	url = git@github.com:SuperOptimizer/libs3.git
+[submodule "third-party/matter-compressor"]
+	path = third-party/matter-compressor
+	url = git@github.com:SuperOptimizer/matter-compressor.git
+[submodule "third-party/fysics"]
+	path = third-party/fysics
+	url = git@github.com:SuperOptimizer/fysics.git
+[submodule "third-party/tiff"]
+	path = third-party/tiff
+	url = git@github.com:SuperOptimizer/tiff.git
