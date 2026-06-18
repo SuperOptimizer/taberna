@@ -43,6 +43,18 @@
 build/
 Build/
 build-*/
+cmake-build-*/
+
+# IDE
+.idea/
+.vscode/
+
+# data: scroll volumes, exports, opendata mirror (large, regenerable)
+/data/
+
+# archive scratch
+*.mca
+*.mca.progress
 
 # CMake generated files
 CMakeFiles/
