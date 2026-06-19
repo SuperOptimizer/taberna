@@ -131,3 +131,6 @@ target_link_libraries(unroll_mr PRIVATE
 add_executable(wind_diag wind_diag.c)
 target_link_libraries(wind_diag PRIVATE taberna_segmentation
   taberna_io taberna_postproc taberna_eval taberna_unwrap taberna_annotate)
+
+add_executable(mca_slice mca_slice.c)
+target_link_libraries(mca_slice PRIVATE taberna_io)

@@ -123,7 +123,18 @@ int main(int argc,char**argv){
   u8 *flat=calloc((size_t)W*H,1); size_t fill=0;
   for(size_t i=0;i<(size_t)W*H;i++){ if(cnt[i]){flat[i]=(u8)(acc[i]/cnt[i]);fill++;} }
   tiff_save_u8(outp,flat,1,H,W);
-  printf("stitched %d tiles -> %s (%dx%d), %.0f%% filled\n",ntile,outp,W,H,100.0*fill/((size_t)W*H));
+  // No-GT quality metric: VERTICAL COHERENCE — a correct unroll maps each sheet to a
+  // vertical band (constant winding across z), so adjacent rows correlate highly;
+  // winding crossings (the outer-wrap artifact) lower it. Mean Pearson over rows.
+  double csum=0; int cnz=0;
+  for(int z=0;z+1<H;z++){ const u8*r0=flat+(size_t)z*W,*r1=flat+(size_t)(z+1)*W;
+    double sx=0,sy=0,sxx=0,syy=0,sxy=0; int nn=0;
+    for(int x=0;x<W;x++){ if(!r0[x]||!r1[x])continue; double a=r0[x],b=r1[x]; sx+=a;sy+=b;sxx+=a*a;syy+=b*b;sxy+=a*b;nn++; }
+    if(nn<50)continue; double vx=sxx-sx*sx/nn,vy=syy-sy*sy/nn; if(vx<=1e-6||vy<=1e-6)continue;
+    csum+=(sxy-sx*sy/nn)/sqrt(vx*vy); cnz++; }
+  double coh=cnz?csum/cnz:0;
+  printf("stitched %d tiles -> %s (%dx%d), %.0f%% filled, vert-coherence=%.4f\n",
+         ntile,outp,W,H,100.0*fill/((size_t)W*H),coh);
   free(cw);free(acc);free(cnt);free(flat);umbilicus_free(&umb);mca_close(arc);
   return 0;
 }
