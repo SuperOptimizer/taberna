@@ -39,12 +39,18 @@ int winding_field_solve(const u8 *mask, int nz, int ny, int nx,
   // because it reuses neighbors already updated this sweep. Same-color voxels are
   // never 6-adjacent (a step flips (z+y+x) parity), so each color sweep is
   // parallel-safe. Honors Dirichlet seeds and the warm-start init unchanged.
+  // Early-exit when the field stops moving: a converged relaxation is identical
+  // whether you stop at convergence or keep sweeping, so this only skips redundant
+  // iterations (output-preserving). eps is tiny vs the field's range (~radius/pitch).
+  const double eps = 1e-3;
   for (int it = 0; it < p.iters; it++) {
+    double maxd = 0.0;
     for (int color = 0; color < 2; color++) {
-      #pragma omp parallel for schedule(static)
+      #pragma omp parallel for schedule(static) reduction(max:maxd)
       for (int z = 0; z < nz; z++)
         for (int y = 0; y < ny; y++)
           for (int x = 0; x < nx; x++) {
+            // unit-stride x (keeps cache lines + vectorization); skip wrong parity
             if (((z + y + x) & 1) != color) continue;
             size_t i = IDX(z, y, x);
             if (!mask[i]) continue;                       // stays 0
@@ -61,9 +67,15 @@ int winding_field_solve(const u8 *mask, int nz, int ny, int nx,
               acc += winding[j];
               cnt++;
             }
-            if (cnt) winding[i] = (f32)((1.0 - p.omega) * winding[i] + p.omega * (acc / cnt));
+            if (cnt) {
+              f32 nv = (f32)((1.0 - p.omega) * winding[i] + p.omega * (acc / cnt));
+              double d = fabs((double)nv - (double)winding[i]);
+              if (d > maxd) maxd = d;
+              winding[i] = nv;
+            }
           }
     }
+    if (maxd < eps) break;   // converged
   }
   return 0;
 }

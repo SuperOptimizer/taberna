@@ -79,15 +79,17 @@ int main(int argc,char**argv){
     fprintf(stderr,"tile (%d,%d) %dx%dx%d...\n",ty,tx,zh,th,tw);
     u8 *img=mca_read(arc,0,(int)zc0,(int)(yc0+ty),(int)(xc0+tx),zh,th,tw);
     if(!img) continue;
+    // Output row is p=z*W+u and the parallel-for partitions z across threads, so
+    // each thread owns disjoint rows -> no two threads share a p. No atomics needed
+    // (profiled as the top self-time hotspot when they were here). Keep z the
+    // parallelized (outermost, non-collapsed) loop or this invariant breaks.
     #pragma omp parallel for schedule(static)
     for(int z=0;z<zh;z++)for(int y=0;y<th;y++)for(int x=0;x<tw;x++){
       size_t i=((size_t)z*th+y)*tw+x; if(img[i]<80) continue;
       f32 w=trilin(cw,cz,cy,cx,(zc0+z)/s,(yc0+ty+y)/s,(xc0+tx+x)/s);
       int u=(int)((w-wmin)*ppw); if(u<0||u>=W) continue;
       size_t p=(size_t)z*W+u;
-      #pragma omp atomic
       acc[p]+=img[i];
-      #pragma omp atomic
       cnt[p]++;
     }
     free(img); ntile++;
