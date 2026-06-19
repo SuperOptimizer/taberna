@@ -90,3 +90,7 @@ target_link_libraries(surface_clean PRIVATE
 add_executable(surface_hess surface_hess.c)
 target_link_libraries(surface_hess PRIVATE
   taberna_io taberna_segmentation taberna_postproc taberna_eval)
+
+add_executable(surface_multi surface_multi.c)
+target_link_libraries(surface_multi PRIVATE
+  taberna_io taberna_segmentation taberna_postproc taberna_eval)
