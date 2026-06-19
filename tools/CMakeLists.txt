@@ -32,3 +32,11 @@ target_link_libraries(surface_sweep PRIVATE
 add_executable(ridge_clean ridge_clean.c)
 target_link_libraries(ridge_clean PRIVATE
   taberna_io taberna_segmentation taberna_postproc taberna_eval)
+
+add_executable(st_sweep st_sweep.c)
+target_link_libraries(st_sweep PRIVATE
+  taberna_io taberna_segmentation taberna_postproc taberna_eval)
+
+add_executable(ridge_connect ridge_connect.c)
+target_link_libraries(ridge_connect PRIVATE
+  taberna_io taberna_segmentation taberna_postproc taberna_eval)

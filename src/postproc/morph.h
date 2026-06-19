@@ -53,4 +53,14 @@ void erode_ball (const u8 *in, u8 *out, int nz, int ny, int nx, int r);
 void closing_ball(const u8 *in, u8 *out, int nz, int ny, int nx, int r); // dilate∘erode
 void opening_ball(const u8 *in, u8 *out, int nz, int ny, int nx, int r); // erode∘dilate
 
+/* Normal-aware morphological close: bridge gaps ALONG a sheet (within its tangent
+ * plane) without thickening ACROSS it, using the per-voxel structure-tensor normal
+ * field `normal` (interleaved x,y,z per voxel; |n|=1). A 26-neighbor offset d counts
+ * as in-plane when |d·n|/|d| <= plane_tol (e.g. 0.5 ≈ within 60° of the plane).
+ * Runs `iters` in-plane dilation steps then `iters` in-plane erosion steps, so the
+ * sheet's broken centerline reconnects but its across-sheet thickness is preserved.
+ * In-place. */
+void inplane_close(u8 *mask, const f32 *normal, int nz, int ny, int nx,
+                   f32 plane_tol, int iters);
+
 #endif // TABERNA_MORPH_H

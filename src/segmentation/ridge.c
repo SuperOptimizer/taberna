@@ -1,6 +1,8 @@
 /* ridge.c — see ridge.h. */
 #include "segmentation/ridge.h"
 
+#include <math.h>
+
 #define IDX(z, y, x) ((size_t)(z) * nynx + (size_t)(y) * nx + (size_t)(x))
 
 /* Trilinear sample of `v` at continuous (zf,yf,xf), clamped to the volume. */
@@ -34,10 +36,19 @@ size_t ridge_nms(const f32 *ct, const f32 *sheet, const f32 *normal,
         size_t i = IDX(z, y, x);
         if (sheet[i] < s_min || ct[i] < i_min) { out[i] = 0; continue; }
         f32 nxc = normal[3*i+0], nyc = normal[3*i+1], nzc = normal[3*i+2];
+        f32 c = ct[i];
         f32 fwd = trilin(ct, nz, ny, nx, z + step*nzc, y + step*nyc, x + step*nxc);
         f32 bwd = trilin(ct, nz, ny, nx, z - step*nzc, y - step*nyc, x - step*nxc);
-        if (ct[i] >= fwd && ct[i] >= bwd) { out[i] = 1; kept++; }
-        else out[i] = 0;
+        if (c < fwd || c < bwd) { out[i] = 0; continue; }   // not a local max
+        // Sub-voxel peak of the parabola through (bwd, c, fwd) at offsets (-1,0,1)·step.
+        // denom < 0 => concave (a real ridge); peak offset t* in units of step.
+        f32 denom = bwd - 2.0f*c + fwd;
+        if (denom < -1e-3f) {
+          f32 tstar = 0.5f * (bwd - fwd) / denom;
+          if (fabsf(tstar) > 0.5f) { out[i] = 0; continue; }  // peak sits in a neighbor
+        }
+        // (near-flat plateau max: denom ~ 0 -> keep this voxel)
+        out[i] = 1; kept++;
       }
   (void)n;
   return kept;

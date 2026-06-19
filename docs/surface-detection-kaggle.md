@@ -173,13 +173,38 @@ GT surface = 1.40M voxels = 14.8% of the valid (non-ignore) region.
    Surface Dice holds **0.67**, **b1 39.6k → 3.2k** (10× topology improvement).
 
 Net arc this session: Surface Dice **0.23 → 0.68**, Dice **0.11 → 0.26**, topology
-controllable. Residual gap vs the ~0.60 leaderboard is detector *precision*: the
-dilated ridge is ~3 voxels vs the label's ~1.5, capping Dice. **Next detector
-work:** multi-scale ridge response; connect porous ridges by walking along the
-tensor in-plane orientation instead of blunt dilation; intensity normalization;
-per-scroll param fit. **Next post-proc:** PCA height-map repair, multi-threshold
-unmerge, 256-entry 2×2×2 watertight LUT. **Next metric:** official composite
-(persistent-homology Betti matching) for a directly-comparable score.
+controllable. Residual gap vs the ~0.60 leaderboard is detector *precision*.
+
+### Detector-precision investigation (what moves it, what doesn't)
+
+Tried, on the same cube, to close the gap:
+- **Sub-voxel parabolic NMS** (`ridge.c`, keep voxel iff the across-normal CT
+  parabola peaks within ±0.5): **no effect** — kept-voxel counts moved <0.1%; the
+  `>=` ties weren't the thickness source.
+- **Structure-tensor scale sweep** (`st_sweep`, sigma_grad×sigma_tensor): **placement
+  is scale-invariant** — exact-match SurfD@0 stays 0.10–0.14 across all scales,
+  SurfD@2 peaks ~0.686. So the 1–2 voxel offset is **not** normal-blur; it's a
+  label-convention offset (the CT intensity peak ≠ the labelers' "smoothed sheet
+  position"). This is the genuine classical-vs-learned gap.
+- **Normal-aware (in-plane) closing** (`morph.c inplane_close`, `ridge_connect`):
+  de-fragments well (b0 398→79, b1 34k→5.3k) but bloats volume as much as isotropic
+  dilation and does **not** beat blunt `dilate(1)+median(2)` on Dice/SurfD
+  (0.219 vs 0.249 Dice; both ~0.66 SurfD). The 60° in-plane tolerance leaks
+  across-sheet growth.
+
+**Conclusion:** the structure-tensor-normal + CT-intensity-ridge family plateaus at
+**SurfD@2 ≈ 0.68 / Dice ≈ 0.25**, ceilinged by label-convention placement, not by
+tunable knobs. Best practical recipe: ridge NMS (s_min≈0.3, i_min≈80) +
+dilate(1) + median(2) + fill.
+
+**To break the ceiling needs a different lever, not more tuning:** (a) a Hessian/
+Frangi *medialness* response (different ridge definition that may sit on the label);
+(b) explicitly calibrate to the convention (match the label's thickness/smoothing);
+or (c) accept ~0.68 and pivot — implement the **official composite metric**
+(persistent-homology Betti matching) to learn whether 0.68 SurfD is already
+competitive, since the leaderboard blend may weight tolerance differently than our
+volumetric Dice. **Other open post-proc:** PCA height-map repair, multi-threshold
+unmerge, 256-entry 2×2×2 watertight LUT.
 
 ## Implications for taberna (concrete)
 

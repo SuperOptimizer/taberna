@@ -3,6 +3,7 @@
 
 #include <stdlib.h>
 #include <string.h>
+#include <math.h>
 
 #define IDX(z, y, x) ((size_t)(z) * nynx + (size_t)(y) * nx + (size_t)(x))
 
@@ -164,5 +165,46 @@ void opening_ball(const u8 *in, u8 *out, int nz, int ny, int nx, int r) {
   u8 *tmp = (u8 *)malloc(n);
   morph_ball(in, tmp, nz, ny, nx, r, 1);   // erode
   morph_ball(tmp, out, nz, ny, nx, r, 0);  // dilate
+  free(tmp);
+}
+
+/* one in-plane step: dilate (grow=1) turns on a bg voxel reached from a fg neighbor
+ * through an in-plane offset; erode (grow=0) turns off a fg voxel that has an
+ * in-plane bg neighbor. `normal` indexed per the *moving* voxel's anchor: for
+ * dilation the fg source neighbor, for erosion the fg voxel itself. */
+static void inplane_step(const u8 *in, u8 *out, const f32 *normal,
+                         int nz, int ny, int nx, f32 plane_tol, int grow) {
+  size_t nynx = (size_t)ny * nx, n = (size_t)nz * nynx;
+  for (size_t i = 0; i < n; i++) out[i] = in[i];
+  for (int z = 0; z < nz; z++)
+    for (int y = 0; y < ny; y++)
+      for (int x = 0; x < nx; x++) {
+        size_t i = IDX(z, y, x);
+        if (grow ? (in[i] != 0) : (in[i] == 0)) continue;  // dilate scans bg, erode scans fg
+        for (int dz = -1; dz <= 1; dz++)
+          for (int dy = -1; dy <= 1; dy++)
+            for (int dx = -1; dx <= 1; dx++) {
+              if (!dz && !dy && !dx) continue;
+              int zz = z+dz, yy = y+dy, xx = x+dx;
+              if (zz<0||zz>=nz||yy<0||yy>=ny||xx<0||xx>=nx) continue;
+              size_t j = IDX(zz, yy, xx);
+              // dilate: neighbor must be fg (source); erode: neighbor must be bg
+              if (grow ? (in[j] == 0) : (in[j] != 0)) continue;
+              // in-plane test using the fg anchor's normal (j for dilate, i for erode)
+              size_t a = grow ? j : i;
+              f32 nx_ = normal[3*a+0], ny_ = normal[3*a+1], nz_ = normal[3*a+2];
+              f32 dlen = sqrtf((f32)(dz*dz + dy*dy + dx*dx));
+              f32 dot = (dx*nx_ + dy*ny_ + dz*nz_) / dlen;
+              if (fabsf(dot) <= plane_tol) { out[i] = grow ? 1 : 0; break; }
+            }
+      }
+}
+
+void inplane_close(u8 *mask, const f32 *normal, int nz, int ny, int nx,
+                   f32 plane_tol, int iters) {
+  size_t n = (size_t)nz * ny * nx;
+  u8 *tmp = (u8 *)malloc(n);
+  for (int it = 0; it < iters; it++) { inplane_step(mask, tmp, normal, nz, ny, nx, plane_tol, 1); memcpy(mask, tmp, n); }
+  for (int it = 0; it < iters; it++) { inplane_step(mask, tmp, normal, nz, ny, nx, plane_tol, 0); memcpy(mask, tmp, n); }
   free(tmp);
 }
