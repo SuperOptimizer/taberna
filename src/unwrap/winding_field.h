@@ -22,6 +22,8 @@ typedef struct {
   f32 dr_per_winding;  // radial pitch (voxels per wrap); default 8
   int iters;           // Jacobi sweeps; default 50
   f32 omega;           // relaxation blend in [0,1]; default 0.3
+  int warm_start;      // if nonzero, use the passed `winding` as the initial guess
+                       // (coarse-to-fine multigrid) instead of the analytic init
 } wfield_params;
 
 wfield_params winding_default_params(void);

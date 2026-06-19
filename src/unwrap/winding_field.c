@@ -8,7 +8,7 @@
 #define IDX(z, y, x) ((size_t)(z) * nynx + (size_t)(y) * nx + (size_t)(x))
 
 wfield_params winding_default_params(void) {
-  return (wfield_params){.dr_per_winding = 8.0f, .iters = 50, .omega = 0.3f};
+  return (wfield_params){.dr_per_winding = 8.0f, .iters = 50, .omega = 0.3f, .warm_start = 0};
 }
 
 int winding_field_solve(const u8 *mask, int nz, int ny, int nx,
@@ -18,15 +18,19 @@ int winding_field_solve(const u8 *mask, int nz, int ny, int nx,
   size_t n = (size_t)nz * ny * nx, nynx = (size_t)ny * nx;
   const double TWO_PI = 6.283185307179586;
 
-  // initialize: continuous winding estimate from polar coordinates
+  // initialize: analytic polar estimate, OR (warm_start) keep the passed `winding`
+  // as the initial guess for coarse-to-fine multigrid.
+  #pragma omp parallel for schedule(static)
   for (int z = 0; z < nz; z++)
     for (int y = 0; y < ny; y++)
       for (int x = 0; x < nx; x++) {
         size_t i = IDX(z, y, x);
         if (!mask[i]) { winding[i] = 0.0f; continue; }
-        f32 theta, radius;
-        umbilicus_polar(umb, (f32)z, (f32)y, (f32)x, &theta, &radius);
-        winding[i] = (f32)(radius / p.dr_per_winding + theta / TWO_PI);
+        if (!p.warm_start) {
+          f32 theta, radius;
+          umbilicus_polar(umb, (f32)z, (f32)y, (f32)x, &theta, &radius);
+          winding[i] = (f32)(radius / p.dr_per_winding + theta / TWO_PI);
+        }
         if (seed_mask && seed_mask[i]) winding[i] = seed_value[i];
       }
 
@@ -34,6 +38,7 @@ int winding_field_solve(const u8 *mask, int nz, int ny, int nx,
   f32 *tmp = (f32 *)malloc(n * sizeof(f32));
   if (!tmp) return -1;
   for (int it = 0; it < p.iters; it++) {
+    #pragma omp parallel for schedule(static)
     for (int z = 0; z < nz; z++)
       for (int y = 0; y < ny; y++)
         for (int x = 0; x < nx; x++) {

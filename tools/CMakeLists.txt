@@ -111,3 +111,11 @@ add_executable(unroll unroll.c)
 target_link_libraries(unroll PRIVATE
   taberna_io taberna_segmentation taberna_postproc taberna_eval
   taberna_unwrap taberna_annotate)
+
+add_executable(surface_optimize surface_optimize.c)
+target_link_libraries(surface_optimize PRIVATE
+  taberna_io taberna_segmentation taberna_postproc taberna_eval)
+
+add_executable(progressive_unroll progressive_unroll.c)
+target_link_libraries(progressive_unroll PRIVATE
+  taberna_io taberna_postproc taberna_eval taberna_unwrap taberna_annotate)

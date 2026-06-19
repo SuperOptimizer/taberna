@@ -39,16 +39,26 @@ int main(int argc, char **argv) {
   if(!img){fprintf(stderr,"read failed\n");return 1;}
   size_t n=(size_t)d*d*d;
 
-  // 1) surface detection
+  // 1) surface: DENSE papyrus material (intensity >= i_min), lightly cleaned. The
+  //    winding field needs the connected sheet body; dense material gives complete
+  //    coverage (the thin ridge is porous -> black gaps in the unroll). `mode`:
+  //    "material" (default, gap-free) or "ridge" (sharp centerline).
+  const char *mode = argc>9?argv[9]:"material";
   f32 *v=malloc(n*sizeof(f32)); for(size_t i=0;i<n;i++) v[i]=(f32)img[i];
-  f32 *sh=malloc(n*sizeof(f32)),*nm=malloc(3*n*sizeof(f32));
-  fprintf(stderr,"detect...\n"); st_params sp={0.5f,1.0f,1.0f}; st_sheet_detect(v,d,d,d,&sp,sh,nm);
   u8 *mask=malloc(n);
-  ridge_nms(v,sh,nm,d,d,d,0.3f,80.f,1.0f,mask);
+  if (!strcmp(mode,"ridge")) {
+    f32 *sh=malloc(n*sizeof(f32)),*nm=malloc(3*n*sizeof(f32));
+    fprintf(stderr,"ridge detect...\n"); st_params sp={0.5f,1.0f,1.0f};
+    st_sheet_detect(v,d,d,d,&sp,sh,nm);
+    ridge_nms(v,sh,nm,d,d,d,0.3f,80.f,1.0f,mask);
+    free(sh);free(nm);
+  } else {
+    for (size_t i=0;i<n;i++) mask[i] = v[i] >= 80.0f;   // dense material
+    majority_filter(mask,mask,d,d,d,1);                 // despeckle
+  }
   remove_small_components(mask,d,d,d,TOPO_CONN26,200);
   size_t surf=0; for(size_t i=0;i<n;i++) surf+=mask[i];
-  printf("surface voxels: %zu (%.1f%%)\n",surf,100.0*surf/n);
-  free(sh);free(nm);
+  printf("[%s] surface voxels: %zu (%.1f%%)\n",mode,surf,100.0*surf/n);
 
   // 2) umbilicus = straight scroll axis (volume center at THIS lod, region-relative)
   umbilicus umb; umb.n=2; umb.z=malloc(2*sizeof(f32)); umb.y=malloc(2*sizeof(f32)); umb.x=malloc(2*sizeof(f32));
