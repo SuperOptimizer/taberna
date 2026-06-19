@@ -5,3 +5,7 @@ target_include_directories(taberna_io PUBLIC ${CMAKE_SOURCE_DIR}/third-party/tif
 
 find_package(ZLIB REQUIRED)
 target_link_libraries(taberna_io PUBLIC ZLIB::ZLIB tiff)
+
+if(OpenMP_C_FOUND)
+  target_link_libraries(taberna_io PUBLIC OpenMP::OpenMP_C)
+endif()

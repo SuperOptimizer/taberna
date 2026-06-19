@@ -63,4 +63,12 @@ void opening_ball(const u8 *in, u8 *out, int nz, int ny, int nx, int r); // erod
 void inplane_close(u8 *mask, const f32 *normal, int nz, int ny, int nx,
                    f32 plane_tol, int iters);
 
+/* Targeted fragment connector for VOI: set a background voxel to foreground only
+ * if within radius `r` it sees >= 2 DISTINCT foreground components — i.e. it lies
+ * in the thin bridge BETWEEN two nearby fragments of the same sheet. Unlike
+ * closing/dilation it does not thicken the sheets (no SurfDice cost), it only
+ * stitches the gaps that fragment one GT sheet into many predicted components.
+ * Returns voxels added. In-place. */
+size_t connect_fragments(u8 *mask, int nz, int ny, int nx, int r);
+
 #endif // TABERNA_MORPH_H

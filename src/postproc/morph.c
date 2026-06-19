@@ -101,6 +101,34 @@ size_t plug_pinholes(u8 *mask, int nz, int ny, int nx) {
   return plugged;
 }
 
+size_t connect_fragments(u8 *mask, int nz, int ny, int nx, int r) {
+  size_t nynx=(size_t)ny*nx, n=(size_t)nz*nynx;
+  u32 *lab=(u32*)malloc(n*sizeof(u32));
+  cc_label(mask, nz,ny,nx, TOPO_CONN26, lab);
+  u8 *add=(u8*)calloc(n,1);
+  int r2=r*r;
+  #pragma omp parallel for schedule(dynamic)
+  for (int z=0; z<nz; z++)
+    for (int y=0; y<ny; y++)
+      for (int x=0; x<nx; x++) {
+        size_t i=IDX(z,y,x);
+        if (mask[i]) continue;            // only fill background bridge voxels
+        u32 first=0; int two=0;
+        for (int dz=-r; dz<=r && !two; dz++){ int zz=z+dz; if(zz<0||zz>=nz)continue;
+          for (int dy=-r; dy<=r && !two; dy++){ int yy=y+dy; if(yy<0||yy>=ny)continue;
+            for (int dx=-r; dx<=r; dx++){ int xx=x+dx; if(xx<0||xx>=nx)continue;
+              if (dz*dz+dy*dy+dx*dx>r2) continue;
+              u32 l=lab[IDX(zz,yy,xx)]; if(!l) continue;
+              if (!first) first=l; else if (l!=first){ two=1; break; }
+            }}}
+        if (two) add[i]=1;
+      }
+  size_t cnt=0;
+  for (size_t i=0;i<n;i++) if(add[i]){ mask[i]=1; cnt++; }
+  free(lab); free(add);
+  return cnt;
+}
+
 /* ---- ball morphology ------------------------------------------------------ */
 typedef struct { int dz, dy, dx; } off3;
 
