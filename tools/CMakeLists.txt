@@ -67,3 +67,7 @@ target_link_libraries(test_repair PRIVATE taberna_postproc taberna_eval)
 add_executable(surface_repair surface_repair.c)
 target_link_libraries(surface_repair PRIVATE
   taberna_io taberna_segmentation taberna_postproc taberna_eval)
+
+add_executable(surface_ced surface_ced.c)
+target_link_libraries(surface_ced PRIVATE
+  taberna_io taberna_segmentation taberna_postproc taberna_eval)
