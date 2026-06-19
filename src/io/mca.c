@@ -36,6 +36,44 @@ static mc_archive *open_archive(const char *path) {
   return mc_archive_open_dims(path, nx, ny, nz, q);
 }
 
+struct mca_handle {
+  mc_archive *a;
+  int nz, ny, nx, nlods;
+  float q;
+};
+
+mca_handle *mca_open(const char *path) {
+  int nx, ny, nz, nlods; float q;
+  if (mca_dims(path, &nz, &ny, &nx, &q, &nlods) != 0) return NULL;
+  mc_archive *a = mc_archive_open_dims(path, nx, ny, nz, q);
+  if (!a) return NULL;
+  mca_handle *h = (mca_handle *)malloc(sizeof *h);
+  if (!h) { mc_archive_close(a); return NULL; }
+  h->a = a; h->nz = nz; h->ny = ny; h->nx = nx; h->nlods = nlods; h->q = q;
+  return h;
+}
+
+void mca_close(mca_handle *h) {
+  if (!h) return;
+  mc_archive_close(h->a);
+  free(h);
+}
+
+void mca_handle_dims(const mca_handle *h, int *nz, int *ny, int *nx, float *quality, int *nlods) {
+  if (nz) *nz = h->nz; if (ny) *ny = h->ny; if (nx) *nx = h->nx;
+  if (quality) *quality = h->q; if (nlods) *nlods = h->nlods;
+}
+
+u8 *mca_read(const mca_handle *h, int lod, int z0, int y0, int x0,
+             int dz, int dy, int dx) {
+  size_t n = (size_t)dz * dy * dx;
+  u8 *out = (u8 *)malloc(n);
+  if (!out) return NULL;
+  size_t sy = (size_t)dx, sz = (size_t)dx * dy;
+  mc_archive_read_region(h->a, lod, z0, y0, x0, dz, dy, dx, out, sz, sy, 0);
+  return out;
+}
+
 u8 *mca_load_region(const char *path, int lod, int z0, int y0, int x0,
                     int dz, int dy, int dx) {
   mc_archive *a = open_archive(path);

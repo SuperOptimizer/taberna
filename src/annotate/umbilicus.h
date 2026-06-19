@@ -19,6 +19,14 @@ typedef struct {
 
 int  umbilicus_load(const char *path, umbilicus *u);
 void umbilicus_free(umbilicus *u);
+int  umbilicus_save(const char *path, const umbilicus *u);
+
+// Estimate the scroll axis automatically from a material mask (no annotation).
+// Splits z into `nctrl` bands; each control point is the band centroid refined to
+// the center of radial symmetry (the point minimizing angular variance of the
+// material's radial extent), then smoothed across z. Robust to off-center / tilted
+// scrolls. Returns 0 and fills `*out` (caller frees with umbilicus_free), else -1.
+int  umbilicus_estimate(const u8 *mask, int nz, int ny, int nx, int nctrl, umbilicus *out);
 
 // Center (cy,cx) at height z (linear interpolation; clamped past the ends).
 void umbilicus_center(const umbilicus *u, f32 z, f32 *cy, f32 *cx);

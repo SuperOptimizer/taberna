@@ -1,0 +1,68 @@
+{
+  "version": 3,
+  "cmakeMinimumRequired": { "major": 3, "minor": 21, "patch": 0 },
+  "configurePresets": [
+    {
+      "name": "base",
+      "hidden": true,
+      "generator": "Ninja",
+      "toolchainFile": "${sourceDir}/cmake/clang-lld.toolchain.cmake",
+      "cacheVariables": {
+        "CMAKE_C_COMPILER_LAUNCHER": "ccache",
+        "CMAKE_CXX_COMPILER_LAUNCHER": "ccache",
+        "CMAKE_POSITION_INDEPENDENT_CODE": "ON",
+        "TABERNA_MIMALLOC": "ON"
+      }
+    },
+    {
+      "name": "release",
+      "displayName": "Release (default, build-llvm)",
+      "description": "Optimized build: -O3, mimalloc. The canonical build dir.",
+      "inherits": "base",
+      "binaryDir": "${sourceDir}/build-llvm",
+      "cacheVariables": { "CMAKE_BUILD_TYPE": "Release" }
+    },
+    {
+      "name": "profiling",
+      "displayName": "Profiling (frame pointers, build-prof)",
+      "description": "Release + frame pointers for lightweight `perf record --call-graph fp`.",
+      "inherits": "base",
+      "binaryDir": "${sourceDir}/build-prof",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "TABERNA_FRAME_POINTER": "ON"
+      }
+    },
+    {
+      "name": "fast",
+      "displayName": "Fast (unsafe-math ricing + ThinLTO, build-fast)",
+      "description": "Max-speed: -Ofast/-ffast-math/-funroll-loops/-march=native + ThinLTO, on taberna targets only (libmc stays IEEE/deterministic).",
+      "inherits": "base",
+      "binaryDir": "${sourceDir}/build-fast",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "TABERNA_FAST": "ON",
+        "TABERNA_THINLTO": "ON"
+      }
+    },
+    {
+      "name": "debug",
+      "displayName": "Debug (ASan+UBSan, build-debug)",
+      "description": "-O0 -g with AddressSanitizer + UndefinedBehaviorSanitizer. mimalloc off (it interposes malloc and fights ASan).",
+      "inherits": "base",
+      "binaryDir": "${sourceDir}/build-debug",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "TABERNA_MIMALLOC": "OFF",
+        "CMAKE_C_FLAGS_DEBUG": "-O0 -g3 -fno-omit-frame-pointer -fsanitize=address,undefined -fno-sanitize-recover=all",
+        "CMAKE_EXE_LINKER_FLAGS": "-fsanitize=address,undefined"
+      }
+    }
+  ],
+  "buildPresets": [
+    { "name": "release",   "configurePreset": "release" },
+    { "name": "profiling", "configurePreset": "profiling" },
+    { "name": "fast",      "configurePreset": "fast" },
+    { "name": "debug",     "configurePreset": "debug" }
+  ]
+}

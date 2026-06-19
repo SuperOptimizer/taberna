@@ -52,15 +52,12 @@ int main(int argc,char**argv){
   size_t cn=(size_t)cz*cy*cx;
   u8 *cm=malloc(cn); for(size_t i=0;i<cn;i++) cm[i]=cv[i]>=80; majority_filter(cm,cm,cz,cy,cx,1);
   remove_small_components(cm,cz,cy,cx,TOPO_CONN26,50);
-  umbilicus umb; umb.n=2; umb.z=malloc(8);umb.y=malloc(8);umb.x=malloc(8);
-  umb.z[0]=0;umb.z[1]=(f32)(cz-1); umb.y[0]=umb.y[1]=(f32)(cy*0.5); umb.x[0]=umb.x[1]=(f32)(cx*0.5);
-  // pitch estimate (coarse voxels) along rays at mid-z
-  double gaps[100000]; int ng=0; int zmid=cz/2,maxr=(int)(0.95*cy*0.5);
-  for(int a=0;a<256&&ng<90000;a++){double an=a*2*M_PI/256,ca=cos(an),sa=sin(an);int ins=0;double last=-1;
-    for(double r=2;r<maxr;r+=0.5){int yy=(int)(cy*0.5+r*sa),xx=(int)(cx*0.5+r*ca); if(yy<0||yy>=cy||xx<0||xx>=cx)break;
-      int on=cm[((size_t)zmid*cy+yy)*cx+xx]!=0; if(on&&!ins){if(last>0&&r-last>1.5)gaps[ng++]=r-last;last=r;} ins=on;}}
-  double pitch=8; if(ng>20){for(int i=0;i<ng;i++)for(int j=i+1;j<ng;j++)if(gaps[j]<gaps[i]){double t=gaps[i];gaps[i]=gaps[j];gaps[j]=t;}pitch=gaps[ng/2];}
-  printf("coarse pitch %.1f vox (%d crossings)\n",pitch,ng);
+  // auto-estimate the scroll axis (no annotation) and scale pitch to this LOD
+  umbilicus umb;
+  if(umbilicus_estimate(cm,cz,cy,cx,9,&umb)){fprintf(stderr,"umbilicus estimate failed\n");return 1;}
+  fprintf(stderr,"umbilicus (LOD%d) y~%.0f x~%.0f\n",clod,umb.y[umb.n/2],umb.x[umb.n/2]);
+  double pitch=96.0/s;   // physical ~96 LOD0 voxels/wrap, scaled to this LOD
+  printf("coarse pitch %.1f vox (LOD%d)\n",pitch,clod);
   fprintf(stderr,"solving coarse winding...\n");
   f32 *cw=malloc(cn*sizeof(f32)); wfield_params wp=winding_default_params(); wp.dr_per_winding=(f32)pitch;
   if(winding_field_solve(cm,cz,cy,cx,&umb,&wp,NULL,NULL,cw)){fprintf(stderr,"winding failed\n");return 1;}

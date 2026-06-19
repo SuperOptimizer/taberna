@@ -123,3 +123,7 @@ target_link_libraries(progressive_unroll PRIVATE
 add_executable(unroll_full unroll_full.c)
 target_link_libraries(unroll_full PRIVATE
   taberna_io taberna_postproc taberna_eval taberna_unwrap taberna_annotate)
+
+add_executable(unroll_mr unroll_mr.c)
+target_link_libraries(unroll_mr PRIVATE
+  taberna_io taberna_postproc taberna_eval taberna_unwrap taberna_annotate)

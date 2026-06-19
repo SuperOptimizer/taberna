@@ -34,34 +34,36 @@ int winding_field_solve(const u8 *mask, int nz, int ny, int nx,
         if (seed_mask && seed_mask[i]) winding[i] = seed_value[i];
       }
 
-  // light masked Jacobi relaxation (denoise; honor Dirichlet seeds)
-  f32 *tmp = (f32 *)malloc(n * sizeof(f32));
-  if (!tmp) return -1;
+  // Masked relaxation, IN PLACE via red-black Gauss-Seidel: no second n-sized
+  // buffer (Jacobi needed an 8 GB ping-pong at LOD4), and GS converges ~2x faster
+  // because it reuses neighbors already updated this sweep. Same-color voxels are
+  // never 6-adjacent (a step flips (z+y+x) parity), so each color sweep is
+  // parallel-safe. Honors Dirichlet seeds and the warm-start init unchanged.
   for (int it = 0; it < p.iters; it++) {
-    #pragma omp parallel for schedule(static)
-    for (int z = 0; z < nz; z++)
-      for (int y = 0; y < ny; y++)
-        for (int x = 0; x < nx; x++) {
-          size_t i = IDX(z, y, x);
-          if (!mask[i]) { tmp[i] = 0.0f; continue; }
-          if (seed_mask && seed_mask[i]) { tmp[i] = seed_value[i]; continue; }
-          double acc = 0.0;
-          int cnt = 0;
-          int nb[6][3] = {{z, y, x - 1}, {z, y, x + 1}, {z, y - 1, x},
-                          {z, y + 1, x}, {z - 1, y, x}, {z + 1, y, x}};
-          for (int k = 0; k < 6; k++) {
-            int zz = nb[k][0], yy = nb[k][1], xx = nb[k][2];
-            if (xx < 0 || xx >= nx || yy < 0 || yy >= ny || zz < 0 || zz >= nz) continue;
-            size_t j = IDX(zz, yy, xx);
-            if (!mask[j]) continue;
-            acc += winding[j];
-            cnt++;
+    for (int color = 0; color < 2; color++) {
+      #pragma omp parallel for schedule(static)
+      for (int z = 0; z < nz; z++)
+        for (int y = 0; y < ny; y++)
+          for (int x = 0; x < nx; x++) {
+            if (((z + y + x) & 1) != color) continue;
+            size_t i = IDX(z, y, x);
+            if (!mask[i]) continue;                       // stays 0
+            if (seed_mask && seed_mask[i]) continue;      // Dirichlet: pinned
+            double acc = 0.0;
+            int cnt = 0;
+            int nb[6][3] = {{z, y, x - 1}, {z, y, x + 1}, {z, y - 1, x},
+                            {z, y + 1, x}, {z - 1, y, x}, {z + 1, y, x}};
+            for (int k = 0; k < 6; k++) {
+              int zz = nb[k][0], yy = nb[k][1], xx = nb[k][2];
+              if (xx < 0 || xx >= nx || yy < 0 || yy >= ny || zz < 0 || zz >= nz) continue;
+              size_t j = IDX(zz, yy, xx);
+              if (!mask[j]) continue;
+              acc += winding[j];
+              cnt++;
+            }
+            if (cnt) winding[i] = (f32)((1.0 - p.omega) * winding[i] + p.omega * (acc / cnt));
           }
-          tmp[i] = cnt ? (f32)((1.0 - p.omega) * winding[i] + p.omega * (acc / cnt))
-                       : winding[i];
-        }
-    memcpy(winding, tmp, n * sizeof(f32));
+    }
   }
-  free(tmp);
   return 0;
 }

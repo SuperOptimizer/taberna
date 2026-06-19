@@ -1,6 +1,8 @@
 # taberna io — volume ingest for the experiment phase (NRRD, TIFF stacks; zarr later).
-add_library(taberna_io STATIC nrrd.c tiff_vol.c mca.c)
+add_library(taberna_io STATIC nrrd.c tiff_vol.c mca.c mimalloc_tune.c)
 target_include_directories(taberna_io PUBLIC ${CMAKE_SOURCE_DIR}/src)
+# mimalloc override + tuning constructor, propagated to every consumer of taberna_io
+target_link_libraries(taberna_io PUBLIC taberna_malloc)
 target_include_directories(taberna_io PUBLIC ${CMAKE_SOURCE_DIR}/third-party/tiff)
 
 find_package(ZLIB REQUIRED)
