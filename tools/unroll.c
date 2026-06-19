@@ -50,16 +50,41 @@ int main(int argc, char **argv) {
   printf("surface voxels: %zu (%.1f%%)\n",surf,100.0*surf/n);
   free(sh);free(nm);
 
-  // 2) umbilicus = straight scroll axis (volume center, region-relative)
+  // 2) umbilicus = straight scroll axis (volume center at THIS lod, region-relative)
   umbilicus umb; umb.n=2; umb.z=malloc(2*sizeof(f32)); umb.y=malloc(2*sizeof(f32)); umb.x=malloc(2*sizeof(f32));
-  f32 cy=(f32)(fy*0.5 - y0), cx=(f32)(fx*0.5 - x0);
+  double s=(double)(1<<lod);
+  f32 cy=(f32)(fy*0.5/s - y0), cx=(f32)(fx*0.5/s - x0);
   umb.z[0]=0; umb.z[1]=(f32)(d-1); umb.y[0]=umb.y[1]=cy; umb.x[0]=umb.x[1]=cx;
   printf("umbilicus axis at region (y=%.0f, x=%.0f)\n",cy,cx);
+
+  // 2b) estimate the real radial sheet pitch (median gap between consecutive sheet
+  //     crossings along rays from the umbilicus) -> dr_per_winding. The default (8)
+  //     is usually wrong and miscounts wraps.
+  double gaps[200000]; int ng=0;
+  int zmid=d/2; int maxr=(int)(0.95*(d*0.5));
+  for (int ai=0; ai<256 && ng<190000; ai++){
+    double ang=ai*2.0*M_PI/256.0, ca=cos(ang), sa=sin(ang);
+    int inside=0; double last=-1;
+    for (double r=2; r<maxr; r+=0.5){
+      int yy=(int)(cy+r*sa), xx=(int)(cx+r*ca);
+      if (yy<0||yy>=d||xx<0||xx>=d) break;
+      int on = mask[((size_t)zmid*d+yy)*d+xx]!=0;
+      if (on && !inside){ if(last>0 && r-last>1.5) gaps[ng++]=r-last; last=r; }
+      inside=on;
+    }
+  }
+  double pitch=8.0;
+  if (ng>20){ // median
+    for(int i=0;i<ng;i++)for(int j=i+1;j<ng;j++) if(gaps[j]<gaps[i]){double t=gaps[i];gaps[i]=gaps[j];gaps[j]=t;}
+    pitch=gaps[ng/2];
+  }
+  printf("estimated sheet pitch: %.1f voxels  (from %d ray-crossings)\n",pitch,ng);
 
   // 3) winding field
   fprintf(stderr,"winding field...\n");
   f32 *wind=malloc(n*sizeof(f32));
   wfield_params wp=winding_default_params();
+  wp.dr_per_winding=(f32)pitch;
   if (winding_field_solve(mask,d,d,d,&umb,&wp,NULL,NULL,wind)!=0){fprintf(stderr,"winding failed\n");return 1;}
   float wmin=1e30f,wmax=-1e30f; for(size_t i=0;i<n;i++) if(mask[i]){ if(wind[i]<wmin)wmin=wind[i]; if(wind[i]>wmax)wmax=wind[i]; }
   printf("winding range: %.2f .. %.2f  (~%.1f wraps)\n",wmin,wmax,(wmax-wmin));
@@ -76,13 +101,15 @@ int main(int argc, char **argv) {
   }
   free(disp);
 
-  // 5) FLATTEN: map each surface voxel to (winding, z) -> unrolled papyrus image
-  int W = (int)(wmax-wmin)+1; if(W<1)W=1; if(W>20000)W=20000;
+  // 5) FLATTEN: map each surface voxel to (winding*ppw, z) -> unrolled papyrus.
+  // ppw = columns per wrap (resolves position within a wrap, not just wrap index).
+  int ppw = argc>8?atoi(argv[8]):64;
+  int W = (int)((wmax-wmin)*ppw)+1; if(W<1)W=1; if(W>40000)W=40000;
   int H = d;
   double *acc=calloc((size_t)W*H,sizeof(double)); int *cnt=calloc((size_t)W*H,sizeof(int));
   for (int z=0;z<d;z++) for(int y=0;y<d;y++) for(int x=0;x<d;x++){
     size_t i=((size_t)z*d+y)*d+x; if(!mask[i]) continue;
-    int u=(int)(wind[i]-wmin); if(u<0)u=0; if(u>=W)u=W-1;
+    int u=(int)((wind[i]-wmin)*ppw); if(u<0)u=0; if(u>=W)u=W-1;
     acc[(size_t)z*W+u]+=img[i]; cnt[(size_t)z*W+u]++;
   }
   u8 *flat=calloc((size_t)W*H,1);
