@@ -173,16 +173,38 @@ wants their format, that's a one-off export, not a coupling.)
 - **Umbilicus** reference polylines (ThaumatoAnakalyptor layout) for validating our
   own center estimate.
 
-## 5. Volume ingest (minimal; vesuvius-c dropped as obsolete)
+## 5. Volume ingest, compression & compute budget (vesuvius-c dropped as obsolete)
 
-Ingest is intentionally minimal and *not* on the critical path:
-- **Now (experiments):** read `.nrrd` cubes with a hand-rolled ~30-line reader
-  (text header + raw/gzip blob); read TIFF cubes via the `third-party/tiff`
-  submodule. Pre-extract any zarr cubes we want to a trivial `.nrrd`/raw once.
-- **Later (scale):** a minimal zarr-v2 reader (the data is zarr v2, `|u1`, 128³
-  chunks, Blosc-zstd, `/` separator) using `c-blosc2` + a small JSON parse + HTTP;
-  or TensorStore (Apache-2.0, native S3/HTTP, v2 + v3/sharding) if we want it
-  industrial. Decide when we actually need streaming, not before.
+**The working volume is LOCAL, not streamed.** It is stored compressed with
+matter-compressor (~10–25× at the codec quality setting τ≈8–16 — *distinct from the
+SurfaceDice tolerance in §6*) and **fits on NVMe (PCIe Gen5)**. So random-access cube
+reads are fast and there is **no remote-streaming problem to solve** — we deleted that
+from scope. taberna consumes decompressed **u8 cubes** `(z,y,x,dims)`; how a cube is
+produced (matter-compressor's external decode API, or a pre-extracted cube) is opaque
+to us — we do not modify matter-compressor (it is being rewritten elsewhere).
+
+**Lossy-compression budget (must design for it):** decompressed cubes carry
+**~1 % MAE ≈ 2.5 graylevels on u8**. The sheet detector and structure tensor run on
+*this* data, not pristine CT. That is non-trivial at the ~1-voxel inter-wrap gap,
+where 2.5 levels of error can blur the very boundary we must not merge across — it
+strengthens the case for the contrast-invariant phase-symmetry channel and a tight
+structure-tensor integration scale, and it makes "raw vs compressed" a measured
+robustness check (E2b).
+
+**Public ground-truth data** (instance-labels, GP cubes) is separate and read as
+`.nrrd` (hand-rolled ~30-line reader: text header + raw/gzip blob) or TIFF via the
+`third-party/tiff` submodule. No zarr/S3 reader is needed for the planned work; if a
+direct remote reader is ever wanted, revisit then (minimal zarr-v2 + `c-blosc2`, or
+TensorStore).
+
+**Compute budget (target workstation):** Ryzen 9 7950X (16C/32T), 192 GB RAM, 4 TB
+NVMe Gen5, 2× RTX 3090 (48 GB total). Implications: a 256³ u8 cube is ~16 MB
+(~67 MB as f32) — hundreds fit in RAM; block-wise stages parallelize across 32
+threads with the full volume's working set comfortably resident. GPUs are **available
+but not required**: the CPU pipeline is the baseline; the eventual global spiral fit
+(stage 6) or heavy field solves may optionally use a 3090 if it pays off. Local NVMe
+makes the block-wise I/O effectively free, so the scale test (E6) is compute-bound,
+not I/O-bound.
 
 ## 6. Verification metrics
 
@@ -236,6 +258,12 @@ signed-graph approach needs rethink before further investment.
 structure-tensor-only on faint / strong / near-touching wraps. Pick the scalar and
 tune radius/σ to resolve one wrap without bridging (ρ < gap).
 
+**E2b — Compression-robustness check.** Run E2 (and E1) on matter-compressor
+round-tripped cubes (~1 % MAE / ~2.5 graylevels) vs the pristine GT cubes. Quantify
+how much the lossy compression degrades sheet detection and wrap separation at the
+inter-wrap gap. Informs whether we need the phase-symmetry channel and/or a tighter
+codec quality τ for the regions we actually unwrap.
+
 **E3 — Eulerian winding-field prototype.** On a multi-wrap region: solve the
 winding-phase Poisson field, check monotonicity across wraps and **halo-stitch
 consistency** of accumulated winding across a brick boundary (Tier-0 metrics).
@@ -258,9 +286,11 @@ targeted corrections refine).
 
 1. **The central bet:** are structure-tensor *signed* affinities clean enough in
    crushed/delaminated/low-contrast regions? Unvalidated — E1 exists to test it.
-2. **Sub-resolution gap:** adjacent wraps are ~1 voxel apart, at/below stable
-   derivative-filter scale. OOF mitigates, doesn't eliminate; human relative-links
-   are the backstop.
+2. **Sub-resolution gap, worsened by lossy compression:** adjacent wraps are
+   ~1 voxel apart, at/below stable derivative-filter scale — and we read u8 cubes
+   carrying ~1 % MAE (~2.5 graylevels) from matter-compressor, which can blur exactly
+   that gap. OOF + phase-symmetry mitigate, human relative-links are the backstop, and
+   E2b measures the actual damage.
 3. **Single-object topology mismatch:** connectomics segments many closed objects;
    a scroll is one open sheet wound N times. Labeling each *wrap* distinctly via
    signed-graph agglomeration is genuinely novel work.
@@ -290,10 +320,15 @@ docs/               segmentation-sota.md, unwrapping-plan.md
 - **M4** spiral fit + deformation + metrics vs GP / Paul (E5).
 - **M5** scale (E6).
 
-## 10. Decisions still open
+## 10. Decisions (resolved 2026-06-18)
 
-- **Annotation UI:** use any convenient existing slice viewer for week-1, or write a
-  tiny taberna slice-clicker? (Either is fine; not villa-coupled.)
-- **GASP/MWS in C:** port the algorithm directly, or wrap a reference (Higra is C++)?
-- **Hardware budget** for the eventual global fit (affects whether stage 6 stays CPU
-  or wants GPU) — revisit at M4.
+- **Annotation UIs:** build good, purpose-built UIs as each task needs them — assume
+  good tooling, not a constraint. (First likely tool: a slice viewer that places
+  winding-annotated points + renders the pipeline's flagged-inconsistency overlays.)
+- **GASP/MWS:** implement directly in C (small algorithms — sorted-edge union-find for
+  MWS, priority-queue agglomeration for GASP); no C++ Higra dependency.
+- **Compute:** 7950X / 192 GB / 4 TB NVMe Gen5 / 2× 3090. CPU pipeline is the
+  baseline; GPU optional for stage 6 / heavy field solves. Working volume is local
+  and fits compressed, so I/O is not a bottleneck.
+- **Volume access:** local matter-compressor archive (external decode), consumed as
+  u8 cubes; design for ~1 % MAE.

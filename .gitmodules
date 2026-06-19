@@ -13,3 +13,4 @@
 [submodule "third-party/vtk"]
 	path = third-party/vtk
 	url = https://github.com/Kitware/VTK.git
+	shallow = true

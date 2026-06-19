@@ -8,6 +8,26 @@ if(NOT CMAKE_BUILD_TYPE)
   set(CMAKE_BUILD_TYPE Release)
 endif()
 
+# ccache for C and C++, propagated to every subproject. These are directory-scope
+# launchers, set (and cached) BEFORE the add_subdirectory()s below, so the libs3 /
+# matter-compressor / fysics submodules and the gui inherit them automatically.
+find_program(CCACHE_PROGRAM ccache)
+if(CCACHE_PROGRAM)
+  set(CMAKE_C_COMPILER_LAUNCHER   "${CCACHE_PROGRAM}" CACHE STRING "ccache (C)"   FORCE)
+  set(CMAKE_CXX_COMPILER_LAUNCHER "${CCACHE_PROGRAM}" CACHE STRING "ccache (C++)" FORCE)
+  message(STATUS "ccache enabled for C/C++: ${CCACHE_PROGRAM}")
+endif()
+
+# Optional cached ThinLTO for taberna's own targets (NOT VTK, NOT the determinism-
+# sensitive submodules — see the apply block below). Off by default: LTO trades
+# build time for runtime perf a viewer/research build doesn't need. DTLTO
+# (-fthinlto-distributor) is intentionally NOT offered: on a single machine it is
+# equivalent to threaded ThinLTO + lld's --thinlto-cache-dir, which we use instead.
+option(TABERNA_THINLTO "Cached ThinLTO for taberna's own targets (clang only; release-only)" OFF)
+# Fat LTO objects carry BOTH bitcode and machine code, so the .o/.a "gel" with
+# non-LTO consumers and plain ar/nm. Costs extra compile time (both codegen paths).
+option(TABERNA_FAT_LTO "Emit fat LTO objects when TABERNA_THINLTO is on" ON)
+
 # 1) libs3 — the single shared S3 client (leaf dep). Built first so both
 #    matter-compressor and fysics link the SAME `s3` target (no duplicate s3_*
 #    symbols). EXCLUDE_FROM_ALL keeps libs3's own tests/examples out of the build.
@@ -22,6 +42,42 @@ add_subdirectory(third-party/matter-compressor EXCLUDE_FROM_ALL)
 #    `s3` and `matter_compressor` targets defined above.
 add_subdirectory(third-party/fysics)
 
-# 4) taberna's own sources. segmentation/ turns dense scroll volumes into the
-#    sparse supervoxel graph the un-deformation work is built on.
+# vendored minimal TIFF reader/writer (now with LZW + multi-page volume read) —
+# used by src/io to ingest the Vesuvius surface-detection 320^3 u8 TIFF stacks.
+add_subdirectory(third-party/tiff EXCLUDE_FROM_ALL)
+
+# Apply ThinLTO HERE — after the third-party submodules (so it never touches them;
+# matter-compressor's byte-determinism forbids LTO-without-PGO) and before our own
+# sources, which inherit these directory-scope options. Cache + lld threading give
+# the caching/parallelism DTLTO would, on one machine.
+if(TABERNA_THINLTO)
+  if(CMAKE_C_COMPILER_ID MATCHES "Clang")
+    add_compile_options(-flto=thin)
+    add_link_options(-flto=thin -Wl,--thinlto-cache-dir=${CMAKE_BINARY_DIR}/thinlto-cache)
+    message(STATUS "ThinLTO enabled for taberna targets (cache: ${CMAKE_BINARY_DIR}/thinlto-cache)")
+  else()
+    message(WARNING "TABERNA_THINLTO needs clang (-flto=thin); ignoring with ${CMAKE_C_COMPILER_ID}")
+  endif()
+endif()
+
+# 4) taberna's own sources. segmentation/ turns dense scroll volumes into sheets +
+#    the sparse supervoxel graph the un-deformation work is built on; io/ ingests
+#    volumes (NRRD now); tools/ are the runnable experiment drivers.
+add_subdirectory(src/io)
+add_subdirectory(src/annotate)
 add_subdirectory(src/segmentation)
+add_subdirectory(src/eval)
+add_subdirectory(src/postproc)
+add_subdirectory(src/unwrap)
+add_subdirectory(tools)
+
+# 5) optional Qt6+VTK GUI frontend (2x2 MPR + volume render). Opt-in so the core
+#    C pipeline builds without Qt/VTK: cmake -DTABERNA_GUI=ON.
+option(TABERNA_GUI "Build the Qt6+VTK volume viewer frontend" OFF)
+if(TABERNA_GUI)
+  enable_language(CXX)            # Qt6/VTK need C++ (core pipeline stays C-only)
+  set(CMAKE_CXX_STANDARD 17)
+  set(CMAKE_CXX_STANDARD_REQUIRED ON)
+  set(CMAKE_AUTOMOC ON)
+  add_subdirectory(gui)
+endif()

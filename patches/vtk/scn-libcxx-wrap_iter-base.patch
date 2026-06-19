@@ -1,0 +1,16 @@
+diff --git a/ThirdParty/scn/vtkscn/include/vtkscn/scan.h b/ThirdParty/scn/vtkscn/include/vtkscn/scan.h
+index ba68b9f1..4ccac166 100644
+--- a/ThirdParty/scn/vtkscn/include/vtkscn/scan.h
++++ b/ThirdParty/scn/vtkscn/include/vtkscn/scan.h
+@@ -240,7 +240,10 @@ struct wrapped_pointer_iterator<std::__wrap_iter<Elem*>> {
+     SCN_FORCE_INLINE static constexpr auto to_address(
+         const std::__wrap_iter<Elem*>& it) noexcept
+     {
+-        return it.base();
++        // libc++ >= LLVM 18 dropped __wrap_iter::base(); operator-> yields the
++        // underlying pointer (std::__to_address(__i_)). Patched for taberna's
++        // libc++ build.
++        return it.operator->();
+     }
+ };
+ #endif

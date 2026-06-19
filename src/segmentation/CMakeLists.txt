@@ -1,10 +1,16 @@
-# taberna segmentation — classical (no-ML) volume → graph primitives.
-# First member: SNIC 3D supervoxels (snic.c/.h).
-add_library(taberna_segmentation STATIC snic.c)
-target_include_directories(taberna_segmentation PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+# taberna segmentation — classical (no-ML) volume → graph / sheet primitives.
+#   snic.c         — SNIC 3D supervoxels (oversegmentation / graph coarsening)
+#   sheet_tensor.c — structure-tensor sheet detection (sheetness + normal field)
+#   affinity.c     — signed region-adjacency graph from sheet detection
+#   partition.c    — Mutex Watershed signed-graph partition into per-wrap segments
+#   stitch.c       — cross-brick label stitching (delayed-merge primitive)
+add_library(taberna_segmentation STATIC snic.c sheet_tensor.c affinity.c partition.c stitch.c)
+target_include_directories(taberna_segmentation PUBLIC
+  ${CMAKE_CURRENT_SOURCE_DIR}      # legacy: snic.h included as "snic.h"
+  ${CMAKE_SOURCE_DIR}/src)         # new: "segmentation/..", "common/.." style
 
-# libm for the gradient sqr/INFINITY math. No other deps: SNIC operates purely
-# on an in-memory scalar field the caller supplies.
+# libm for the gaussian / eigensolve / sqrt math. No other deps: these operate on
+# an in-memory scalar field the caller supplies.
 find_library(M_LIB m)
 if(M_LIB)
   target_link_libraries(taberna_segmentation PUBLIC ${M_LIB})
