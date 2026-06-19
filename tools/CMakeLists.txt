@@ -60,3 +60,10 @@ target_link_libraries(test_persist0 PRIVATE taberna_topo)
 add_executable(surface_opt surface_opt.c)
 target_link_libraries(surface_opt PRIVATE
   taberna_io taberna_segmentation taberna_postproc taberna_eval)
+
+add_executable(test_repair test_repair.c)
+target_link_libraries(test_repair PRIVATE taberna_postproc taberna_eval)
+
+add_executable(surface_repair surface_repair.c)
+target_link_libraries(surface_repair PRIVATE
+  taberna_io taberna_segmentation taberna_postproc taberna_eval)

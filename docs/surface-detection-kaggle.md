@@ -256,6 +256,26 @@ remove low-persistence tunnels/holes before binarizing, attacking the topology
 problem at the source (helps both the score and unrolling). `tools/pers_dump`
 dumps a diagram for validation.
 
+## Watertight sheet repair — attempted, negative result on our data
+
+`src/postproc/sheet_repair.c` implements the 1st/2nd/4th-place PCA height-map
+repair (PCA per component → splat heights on the (u,v) grid → flood-remove outside
+→ Laplace-inpaint gaps → rasterize watertight). Synthetic flat holed sheet →
+watertight (b1 1→0) ✓. **But on the real cube it made the score WORSE**
+(0.448 → 0.257, b0 78→2754, b1→13103, SurfaceDice→0.14, native==official exactly).
+Why: real components are **curved scroll-wrap arcs, not height functions over one
+plane** (multivalued w gets averaged away), and our ridge's porosity gaps reach the
+grid border so the flood treats them as outside and never fills them. The method
+needs clean *locally-planar* patches — which the competition got from nnU-Net but
+our porous/curved ridge does not.
+
+**Conclusion / open problem:** the wall is the *detector*, not post-processing.
+Watertight (b1=0) sheets need either (a) detection that yields connected,
+locally-planar components (the real fix — hard, classical), or (b) repair on small
+local windows where planarity holds, or (c) a curvature-aware fit (RBF / normal-
+following) instead of a single global plane. The metric infrastructure (exact VOI,
+NSD, exact-dim0 TopoScore) + PH engine now make any such attempt measurable.
+
 ## Implications for taberna (concrete)
 
 1. **Adopt this competition as taberna's surface-detection benchmark.** Same data,
