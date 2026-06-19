@@ -87,7 +87,9 @@ int main(int argc,char**argv){
   f32 *cw=malloc(cn*sizeof(f32)); wfield_params wp=winding_default_params(); wp.dr_per_winding=(f32)pitch;
   if(citers>=0) wp.iters=citers;
   if(warp){ fprintf(stderr,"contour-warp init (deform to scroll shape)...\n");
-    winding_contour_warp(cm,cz,cy,cx,&umb,pitch,cw); wp.warm_start=1; }
+    winding_contour_warp(cm,cz,cy,cx,&umb,pitch,cw); wp.warm_start=1;
+    if(citers<0) wp.iters=5;   // the warp init is already deformed; heavy relaxation
+  }                            // smooths it back toward circular -> only denoise lightly
   winding_field_solve(cm,cz,cy,cx,&umb,&wp,NULL,NULL,cw); free(cm);
 
   // winding range over the cross-section box (sample coarse field)
