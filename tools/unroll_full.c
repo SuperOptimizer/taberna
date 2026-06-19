@@ -41,13 +41,16 @@ int main(int argc,char**argv){
   int tile=atoi(argv[9]),ppw=atoi(argv[10]);
   mca_handle *arc=mca_open(path); if(!arc){fprintf(stderr,"open failed\n");return 1;}
   int fz,fy,fx,nl; float ql; mca_handle_dims(arc,&fz,&fy,&fx,&ql,&nl);
-  double s=(double)(1<<clod); int cz=(int)(fz/s),cy=(int)(fy/s),cx=(int)(fx/s);
+  double s=(double)(1<<clod); double inv_s=1.0/s;  // s is a power of 2 -> inv_s exact
+  int cz=(int)(fz/s),cy=(int)(fy/s),cx=(int)(fx/s);
 
   // coarse global winding (whole scroll at clod)
   fprintf(stderr,"coarse winding LOD%d (%dx%dx%d, %.1f GB vox)...\n",clod,cz,cy,cx,(double)cz*cy*cx/1e9);
   u8 *cv=mca_read(arc,clod,0,0,0,cz,cy,cx); if(!cv){fprintf(stderr,"read fail\n");return 1;}
   size_t cn=(size_t)cz*cy*cx; u8 *cm=malloc(cn);
-  for(size_t i=0;i<cn;i++) cm[i]=cv[i]>=80; majority_filter(cm,cm,cz,cy,cx,1); remove_small_components(cm,cz,cy,cx,TOPO_CONN26,50);
+  #pragma omp parallel for schedule(static)
+  for(size_t i=0;i<cn;i++) cm[i]=cv[i]>=80;
+  majority_filter(cm,cm,cz,cy,cx,1); remove_small_components(cm,cz,cy,cx,TOPO_CONN26,50);
   free(cv);
 
   // auto-estimate the scroll axis (no annotation) instead of assuming volume center
@@ -86,7 +89,7 @@ int main(int argc,char**argv){
     #pragma omp parallel for schedule(static)
     for(int z=0;z<zh;z++)for(int y=0;y<th;y++)for(int x=0;x<tw;x++){
       size_t i=((size_t)z*th+y)*tw+x; if(img[i]<80) continue;
-      f32 w=trilin(cw,cz,cy,cx,(zc0+z)/s,(yc0+ty+y)/s,(xc0+tx+x)/s);
+      f32 w=trilin(cw,cz,cy,cx,(zc0+z)*inv_s,(yc0+ty+y)*inv_s,(xc0+tx+x)*inv_s);
       int u=(int)((w-wmin)*ppw); if(u<0||u>=W) continue;
       size_t p=(size_t)z*W+u;
       acc[p]+=img[i];
