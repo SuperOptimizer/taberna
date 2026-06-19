@@ -11,8 +11,8 @@
 trace_params trace_default_params(void) {
   trace_params p;
   p.st = st_default_params(); p.st.sigma_grad=0.5f; p.st.sigma_tensor=1.0f;
-  p.seed_thresh=0.40f; p.cont_thresh=0.08f; p.step=3.0f; p.snap_radius=1.5f; p.i_min=80.0f;
-  p.normal_cos=0.5f; p.min_size=200;
+  p.seed_thresh=0.40f; p.cont_thresh=0.20f; p.step=2.0f; p.snap_radius=1.0f; p.i_min=90.0f;
+  p.normal_cos=0.6f; p.min_size=200;
   return p;
 }
 
