@@ -24,6 +24,16 @@ typedef struct {
   f32 omega;           // relaxation blend in [0,1]; default 0.3
   int warm_start;      // if nonzero, use the passed `winding` as the initial guess
                        // (coarse-to-fine multigrid) instead of the analytic init
+  const f32 *forcing;  // optional (size nz*ny*nx), default NULL: the divergence of
+                       // the target winding gradient (div of oriented sheet-normal /
+                       // pitch). Turns the Laplacian smoother into a gradient-matching
+                       // Poisson solve so level sets follow the ACTUAL sheets, not a
+                       // radial assumption. See winding_normal_forcing().
+  f32 anchor_lambda;   // default 0. When >0 (with forcing), softly pull the solution
+                       // toward the initial (analytic) field. The normal-divergence
+                       // Poisson alone collapses the spiral monodromy (winding number
+                       // is topological, carried by the angular init); this anchor
+                       // preserves the wrap count while the forcing follows sheets.
 } wfield_params;
 
 wfield_params winding_default_params(void);

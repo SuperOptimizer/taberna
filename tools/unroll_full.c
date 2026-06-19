@@ -23,6 +23,26 @@
 #include "annotate/umbilicus.h"
 #include "unwrap/winding_field.h"
 
+/* Data-driven radial pitch = median spacing between consecutive sheet starts along
+ * rays from the umbilicus at mid-z. This IS dr_per_winding (one sheet per wrap). Far
+ * more reliable than a hardcoded constant — the real scroll's pitch is not what a
+ * fixed LOD0 guess assumes. */
+static double measure_pitch(const u8*v,int nz,int ny,int nx,const umbilicus*umb,double fallback){
+  int z=nz/2; f32 cyf,cxf; umbilicus_center(umb,(f32)z,&cyf,&cxf);
+  size_t nynx=(size_t)ny*nx; int maxr=(int)(0.9*(ny<nx?ny:nx)*0.5);
+  int *hist=calloc(maxr+2,sizeof(int)); long total=0;
+  // measure on RAW intensity (v>=80), NOT the morphologically-cleaned mask: cleaning
+  // closes the thin inter-sheet gaps and merges wraps, inflating the apparent pitch.
+  for(int a=0;a<360;a++){ double ca=cos(a*M_PI/180),sa=sin(a*M_PI/180);
+    int prev=0,laststart=-1;
+    for(int r=2;r<maxr;r++){ int yy=(int)(cyf+r*sa),xx=(int)(cxf+r*ca);
+      if(yy<0||yy>=ny||xx<0||xx>=nx)break; int on=v[(size_t)z*nynx+(size_t)yy*nx+xx]>=80;
+      if(on&&!prev){ if(laststart>0){int g=r-laststart; if(g>=1&&g<=maxr)hist[g]++,total++;} laststart=r; } prev=on; } }
+  if(total<50){ free(hist); return fallback; }
+  long acc=0; int med=1; for(int g=1;g<=maxr;g++){ acc+=hist[g]; if(acc*2>=total){med=g;break;} }
+  free(hist); return med>0?med:fallback;
+}
+
 static f32 trilin(const f32*w,int nz,int ny,int nx,double z,double y,double x){
   if(z<0)z=0;if(z>nz-1)z=nz-1;if(y<0)y=0;if(y>ny-1)y=ny-1;if(x<0)x=0;if(x>nx-1)x=nx-1;
   int z0=(int)z,y0=(int)y,x0=(int)x,z1=z0<nz-1?z0+1:z0,y1=y0<ny-1?y0+1:y0,x1=x0<nx-1?x0+1:x0;
@@ -39,6 +59,7 @@ int main(int argc,char**argv){
   const char*path=argv[1],*outp=argv[2]; int clod=atoi(argv[3]);
   long zc0=atol(argv[4]); int zh=atoi(argv[5]); long yc0=atol(argv[6]),xc0=atol(argv[7]); int ext=atoi(argv[8]);
   int tile=atoi(argv[9]),ppw=atoi(argv[10]);
+  int citers=argc>11?atoi(argv[11]):-1;   // coarse winding iters (-1 = solver default)
   mca_handle *arc=mca_open(path); if(!arc){fprintf(stderr,"open failed\n");return 1;}
   int fz,fy,fx,nl; float ql; mca_handle_dims(arc,&fz,&fy,&fx,&ql,&nl);
   double s=(double)(1<<clod); double inv_s=1.0/s;  // s is a power of 2 -> inv_s exact
@@ -51,7 +72,6 @@ int main(int argc,char**argv){
   #pragma omp parallel for schedule(static)
   for(size_t i=0;i<cn;i++) cm[i]=cv[i]>=80;
   majority_filter(cm,cm,cz,cy,cx,1); remove_small_components(cm,cz,cy,cx,TOPO_CONN26,50);
-  free(cv);
 
   // auto-estimate the scroll axis (no annotation) instead of assuming volume center
   umbilicus umb;
@@ -60,8 +80,11 @@ int main(int argc,char**argv){
   for(int i=0;i<umb.n;i++) fprintf(stderr,"(%.0f,%.0f,%.0f) ",umb.z[i],umb.y[i],umb.x[i]);
   fprintf(stderr,"\n");
 
-  // pitch is physical (~96 LOD0 voxels/wrap here); scale to this LOD's voxels
-  f32 *cw=malloc(cn*sizeof(f32)); wfield_params wp=winding_default_params(); wp.dr_per_winding=(f32)(96.0/s);
+  // pitch is data-driven: measured median sheet spacing at this LOD (= 1 wrap)
+  double pitch=measure_pitch(cv,cz,cy,cx,&umb,96.0/s); free(cv);
+  fprintf(stderr,"measured pitch %.2f vox (LOD%d) -> ~%.0f LOD0 vox/wrap\n",pitch,clod,pitch*s);
+  f32 *cw=malloc(cn*sizeof(f32)); wfield_params wp=winding_default_params(); wp.dr_per_winding=(f32)pitch;
+  if(citers>=0) wp.iters=citers;
   winding_field_solve(cm,cz,cy,cx,&umb,&wp,NULL,NULL,cw); free(cm);
 
   // winding range over the cross-section box (sample coarse field)

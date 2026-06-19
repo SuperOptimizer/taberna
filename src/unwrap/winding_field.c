@@ -8,7 +8,8 @@
 #define IDX(z, y, x) ((size_t)(z) * nynx + (size_t)(y) * nx + (size_t)(x))
 
 wfield_params winding_default_params(void) {
-  return (wfield_params){.dr_per_winding = 8.0f, .iters = 50, .omega = 0.3f, .warm_start = 0};
+  return (wfield_params){.dr_per_winding = 8.0f, .iters = 50, .omega = 0.3f,
+                         .warm_start = 0, .forcing = NULL, .anchor_lambda = 0.0f};
 }
 
 int winding_field_solve(const u8 *mask, int nz, int ny, int nx,
@@ -39,6 +40,17 @@ int winding_field_solve(const u8 *mask, int nz, int ny, int nx,
   // because it reuses neighbors already updated this sweep. Same-color voxels are
   // never 6-adjacent (a step flips (z+y+x) parity), so each color sweep is
   // parallel-safe. Honors Dirichlet seeds and the warm-start init unchanged.
+  // Optional Tikhonov anchor: a copy of the initial field the solution is softly
+  // pulled toward (preserves the angular monodromy the forcing would otherwise wash
+  // out). Only allocated when actually used.
+  f32 *anchor = NULL;
+  double lam = (p.forcing && p.anchor_lambda > 0.0f) ? (double)p.anchor_lambda : 0.0;
+  if (lam > 0.0) {
+    anchor = (f32 *)malloc(n * sizeof(f32));
+    if (!anchor) return -1;
+    memcpy(anchor, winding, n * sizeof(f32));
+  }
+
   // Early-exit when the field stops moving: a converged relaxation is identical
   // whether you stop at convergence or keep sweeping, so this only skips redundant
   // iterations (output-preserving). eps is tiny vs the field's range (~radius/pitch).
@@ -68,7 +80,15 @@ int winding_field_solve(const u8 *mask, int nz, int ny, int nx,
               cnt++;
             }
             if (cnt) {
-              f32 nv = (f32)((1.0 - p.omega) * winding[i] + p.omega * (acc / cnt));
+              // Poisson gradient-matching with optional anchor:
+              //   (cnt+lam)*W[i] = sum_neighbors - div(g) + lam*anchor[i]
+              // forcing[i]=div of desired gradient (NULL->0->plain Laplacian); the
+              // lam term softly holds W near the analytic init (keeps the monodromy).
+              double num = acc - (p.forcing ? (double)p.forcing[i] : 0.0);
+              double den = cnt;
+              if (anchor) { num += lam * anchor[i]; den += lam; }
+              double target = num / den;
+              f32 nv = (f32)((1.0 - p.omega) * winding[i] + p.omega * target);
               double d = fabs((double)nv - (double)winding[i]);
               if (d > maxd) maxd = d;
               winding[i] = nv;
@@ -77,5 +97,6 @@ int winding_field_solve(const u8 *mask, int nz, int ny, int nx,
     }
     if (maxd < eps) break;   // converged
   }
+  free(anchor);
   return 0;
 }
