@@ -102,3 +102,7 @@ target_link_libraries(surface_prep PRIVATE
 add_executable(surface_connect surface_connect.c)
 target_link_libraries(surface_connect PRIVATE
   taberna_io taberna_segmentation taberna_postproc taberna_eval)
+
+add_executable(trace_real trace_real.c)
+target_link_libraries(trace_real PRIVATE
+  taberna_io taberna_segmentation taberna_postproc taberna_eval)
