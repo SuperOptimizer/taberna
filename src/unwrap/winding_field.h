@@ -39,6 +39,14 @@ typedef struct {
 
 wfield_params winding_default_params(void);
 
+// Contour-warp winding init: the real scroll is NOT a circular spiral. Warp the radial
+// coordinate by the per-z outer-boundary shape R(theta) so iso-winding contours follow
+// the actual (egg-shaped) scroll envelope: W = (r*Rref/R(theta))/pitch + theta/2pi.
+// Robust (outer envelope only, no per-voxel normals). Writes `winding` (nz*ny*nx); feed
+// it back as a warm_start init to winding_field_solve to refine. `pitch` = voxels/wrap.
+void winding_contour_warp(const u8 *mask, int nz, int ny, int nx,
+                          const umbilicus *umb, double pitch, f32 *winding);
+
 // Solve the winding field over the foreground (mask != 0). `seed_value`/`seed_mask`
 // (both size nz*ny*nx, may be NULL) pin absolute-winding Dirichlet seeds. Writes
 // `winding` (nz*ny*nx). Returns 0 on success.

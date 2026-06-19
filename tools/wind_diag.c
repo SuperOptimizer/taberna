@@ -21,6 +21,21 @@
 #include "unwrap/winding_field.h"
 #include "segmentation/sheet_tensor.h"
 
+/* Data-driven pitch: median radial gap between consecutive sheet starts (raw
+ * intensity) along rays from the umbilicus. = dr_per_winding (one sheet per wrap). */
+static double measure_pitch(const u8*v,int nz,int ny,int nx,const umbilicus*umb,double fb){
+  int z=nz/2; f32 cyf,cxf; umbilicus_center(umb,(f32)z,&cyf,&cxf);
+  size_t nynx=(size_t)ny*nx; int maxr=(int)(0.9*(ny<nx?ny:nx)*0.5);
+  int *hist=calloc(maxr+2,sizeof(int)); long total=0;
+  for(int a=0;a<360;a++){ double ca=cos(a*M_PI/180),sa=sin(a*M_PI/180); int prev=0,laststart=-1;
+    for(int r=2;r<maxr;r++){ int yy=(int)(cyf+r*sa),xx=(int)(cxf+r*ca);
+      if(yy<0||yy>=ny||xx<0||xx>=nx)break; int on=v[(size_t)z*nynx+(size_t)yy*nx+xx]>=80;
+      if(on&&!prev){ if(laststart>0){int g=r-laststart; if(g>=1&&g<=maxr)hist[g]++,total++;} laststart=r; } prev=on; } }
+  if(total<50){ free(hist); return fb; }
+  long acc=0; int med=1; for(int g=1;g<=maxr;g++){ acc+=hist[g]; if(acc*2>=total){med=g;break;} }
+  free(hist); return med>0?med:fb;
+}
+
 /* Build the Poisson forcing div(g), g = (sheetness * oriented sheet-normal)/pitch,
  * so the winding gradient follows the ACTUAL sheets. Normals are oriented outward
  * (away from the umbilicus axis = increasing-winding direction). Returns malloc'd
@@ -63,6 +78,7 @@ int main(int argc,char**argv){
   const char*path=argv[1],*base=argv[2]; int clod=atoi(argv[3]); long zc=atol(argv[4]);
   int citers=argc>5?atoi(argv[5]):-1; double pitch=argc>6?atof(argv[6]):-1;
   int usenormal=argc>7?atoi(argv[7]):0; double lambda=argc>8?atof(argv[8]):0.05;
+  int warp=argc>9?atoi(argv[9]):0;
   mca_handle*arc=mca_open(path); if(!arc){fprintf(stderr,"open fail\n");return 1;}
   int fz,fy,fx,nl; float ql; mca_handle_dims(arc,&fz,&fy,&fx,&ql,&nl);
   double s=(double)(1<<clod); int cz=(int)(fz/s),cy=(int)(fy/s),cx=(int)(fx/s);
@@ -74,11 +90,14 @@ int main(int argc,char**argv){
   majority_filter(cm,cm,cz,cy,cx,1); remove_small_components(cm,cz,cy,cx,TOPO_CONN26,50);
   umbilicus umb; if(umbilicus_estimate(cm,cz,cy,cx,9,&umb)){fprintf(stderr,"umb fail\n");return 1;}
   f32*cw=malloc(cn*sizeof(f32)); wfield_params wp=winding_default_params();
-  wp.dr_per_winding=(f32)(pitch>0?pitch:96.0/s); if(citers>=0) wp.iters=citers;
+  wp.dr_per_winding=(f32)(pitch>0?pitch:measure_pitch(cv,cz,cy,cx,&umb,96.0/s));
+  fprintf(stderr,"pitch=%.2f vox\n",wp.dr_per_winding); if(citers>=0) wp.iters=citers;
   f32 *forcing=NULL;
   if(usenormal){ fprintf(stderr,"computing sheet-normal forcing (lambda=%.3f)...\n",lambda);
     forcing=normal_forcing(cv,cm,cz,cy,cx,&umb,wp.dr_per_winding); wp.forcing=forcing;
     wp.anchor_lambda=(f32)lambda; }
+  if(warp){ fprintf(stderr,"contour-warp init (deform to scroll shape)...\n");
+    winding_contour_warp(cm,cz,cy,cx,&umb,wp.dr_per_winding,cw); wp.warm_start=1; }
   winding_field_solve(cm,cz,cy,cx,&umb,&wp,NULL,NULL,cw);
   free(forcing);
 

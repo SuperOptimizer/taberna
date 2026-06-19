@@ -7,6 +7,54 @@
 
 #define IDX(z, y, x) ((size_t)(z) * nynx + (size_t)(y) * nx + (size_t)(x))
 
+void winding_contour_warp(const u8 *mask, int nz, int ny, int nx,
+                          const umbilicus *umb, double pitch, f32 *winding) {
+  const int NB = 180;
+  size_t nynx = (size_t)ny * nx;
+  const double TWO_PI = 6.283185307179586;
+  #pragma omp parallel for schedule(static)
+  for (int z = 0; z < nz; z++) {
+    f32 cyf, cxf;
+    umbilicus_center(umb, (f32)z, &cyf, &cxf);
+    double Rb[180];
+    for (int i = 0; i < NB; i++) Rb[i] = 0;
+    // outer-boundary radius per angle bin = the scroll envelope at this z
+    for (int y = 0; y < ny; y++)
+      for (int x = 0; x < nx; x++) {
+        size_t i = (size_t)z * nynx + (size_t)y * nx + x;
+        if (!mask[i]) continue;
+        double dy = y - cyf, dx = x - cxf, r = sqrt(dy * dy + dx * dx);
+        int b = (int)((atan2(dy, dx) + M_PI) / TWO_PI * NB);
+        if (b < 0) b = 0; if (b >= NB) b = NB - 1;
+        if (r > Rb[b]) Rb[b] = r;
+      }
+    // fill empty bins + circularly smooth the envelope
+    for (int pass = 0; pass < 10; pass++) {
+      double t[180];
+      for (int i = 0; i < NB; i++) {
+        double a = Rb[(i - 1 + NB) % NB], b = Rb[i], c = Rb[(i + 1) % NB];
+        int cn = 0; double s = 0;
+        if (a > 0) { s += a; cn++; } if (b > 0) { s += b; cn++; } if (c > 0) { s += c; cn++; }
+        t[i] = cn ? s / cn : 0;
+      }
+      for (int i = 0; i < NB; i++) Rb[i] = t[i];
+    }
+    double Rref = 0; int cc = 0;
+    for (int i = 0; i < NB; i++) if (Rb[i] > 0) { Rref += Rb[i]; cc++; }
+    Rref = cc ? Rref / cc : 1;
+    for (int y = 0; y < ny; y++)
+      for (int x = 0; x < nx; x++) {
+        size_t i = (size_t)z * nynx + (size_t)y * nx + x;
+        if (!mask[i]) { winding[i] = 0; continue; }
+        double dy = y - cyf, dx = x - cxf, r = sqrt(dy * dy + dx * dx), th = atan2(dy, dx);
+        int b = (int)((th + M_PI) / TWO_PI * NB);
+        if (b < 0) b = 0; if (b >= NB) b = NB - 1;
+        double Rt = Rb[b] > 1 ? Rb[b] : Rref;
+        winding[i] = (f32)(r * (Rref / Rt) / pitch + th / TWO_PI);
+      }
+  }
+}
+
 wfield_params winding_default_params(void) {
   return (wfield_params){.dr_per_winding = 8.0f, .iters = 50, .omega = 0.3f,
                          .warm_start = 0, .forcing = NULL, .anchor_lambda = 0.0f};

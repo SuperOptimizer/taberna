@@ -60,6 +60,7 @@ int main(int argc,char**argv){
   long zc0=atol(argv[4]); int zh=atoi(argv[5]); long yc0=atol(argv[6]),xc0=atol(argv[7]); int ext=atoi(argv[8]);
   int tile=atoi(argv[9]),ppw=atoi(argv[10]);
   int citers=argc>11?atoi(argv[11]):-1;   // coarse winding iters (-1 = solver default)
+  int warp=argc>12?atoi(argv[12]):0;       // 1 = contour-warp init (deform to scroll shape)
   mca_handle *arc=mca_open(path); if(!arc){fprintf(stderr,"open failed\n");return 1;}
   int fz,fy,fx,nl; float ql; mca_handle_dims(arc,&fz,&fy,&fx,&ql,&nl);
   double s=(double)(1<<clod); double inv_s=1.0/s;  // s is a power of 2 -> inv_s exact
@@ -85,6 +86,8 @@ int main(int argc,char**argv){
   fprintf(stderr,"measured pitch %.2f vox (LOD%d) -> ~%.0f LOD0 vox/wrap\n",pitch,clod,pitch*s);
   f32 *cw=malloc(cn*sizeof(f32)); wfield_params wp=winding_default_params(); wp.dr_per_winding=(f32)pitch;
   if(citers>=0) wp.iters=citers;
+  if(warp){ fprintf(stderr,"contour-warp init (deform to scroll shape)...\n");
+    winding_contour_warp(cm,cz,cy,cx,&umb,pitch,cw); wp.warm_start=1; }
   winding_field_solve(cm,cz,cy,cx,&umb,&wp,NULL,NULL,cw); free(cm);
 
   // winding range over the cross-section box (sample coarse field)
