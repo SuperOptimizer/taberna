@@ -31,6 +31,7 @@ int ced_diffuse(f32 *vol, int nz, int ny, int nx, const ced_params *p) {
 
   for(int it=0; it<q.iters; it++){
     // flux = D grad(u),  D = c_perp*I - (c_perp-c_norm) n n^T,  c_perp tied to sheetness
+    #pragma omp parallel for schedule(static)
     for(int z=0;z<nz;z++) for(int y=0;y<ny;y++) for(int x=0;x<nx;x++){
       size_t i=IDX(z,y,x);
       f32 ux=0.5f*(u[IDX(z,y,cl(x+1,nx))]-u[IDX(z,y,cl(x-1,nx))]);
@@ -46,6 +47,7 @@ int ced_diffuse(f32 *vol, int nz, int ny, int nx, const ced_params *p) {
       flux[3*i+2]=cper*uz - beta*ndg*nz_;
     }
     // u += dt * div(flux)
+    #pragma omp parallel for schedule(static)
     for(int z=0;z<nz;z++) for(int y=0;y<ny;y++) for(int x=0;x<nx;x++){
       size_t i=IDX(z,y,x);
       f32 dfx=0.5f*(flux[3*IDX(z,y,cl(x+1,nx))+0]-flux[3*IDX(z,y,cl(x-1,nx))+0]);

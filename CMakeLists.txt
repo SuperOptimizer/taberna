@@ -8,6 +8,10 @@ if(NOT CMAKE_BUILD_TYPE)
   set(CMAKE_BUILD_TYPE Release)
 endif()
 
+# OpenMP for taberna's compute libs (structure tensor, CED, NSD, morphology, PH):
+# the hot loops are per-voxel and embarrassingly parallel. Linked per-target below.
+find_package(OpenMP)
+
 # ccache for C and C++, propagated to every subproject. These are directory-scope
 # launchers, set (and cached) BEFORE the add_subdirectory()s below, so the libs3 /
 # matter-compressor / fysics submodules and the gui inherit them automatically.

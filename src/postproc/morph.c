@@ -13,6 +13,7 @@ void majority_filter_thresh(const u8 *in, u8 *out, int nz, int ny, int nx,
   u8 *a = (u8 *)malloc(n), *b = (u8 *)malloc(n);
   memcpy(a, in, n);
   for (int it = 0; it < iters; it++) {
+    #pragma omp parallel for schedule(static)
     for (int z = 0; z < nz; z++)
       for (int y = 0; y < ny; y++)
         for (int x = 0; x < nx; x++) {
@@ -123,6 +124,7 @@ static void morph_ball(const u8 *in, u8 *out, int nz, int ny, int nx, int r, int
   size_t nynx = (size_t)ny * nx, n = (size_t)nz * nynx;
   int no; off3 *o = ball_offsets(r, &no);
   u8 *res = (u8 *)malloc(n);
+  #pragma omp parallel for schedule(static)
   for (int z = 0; z < nz; z++)
     for (int y = 0; y < ny; y++)
       for (int x = 0; x < nx; x++) {

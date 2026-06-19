@@ -6,3 +6,7 @@ find_library(M_LIB m)
 if(M_LIB)
   target_link_libraries(taberna_eval PUBLIC ${M_LIB})
 endif()
+
+if(OpenMP_C_FOUND)
+  target_link_libraries(taberna_eval PUBLIC OpenMP::OpenMP_C)
+endif()

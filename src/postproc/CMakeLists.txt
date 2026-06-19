@@ -4,3 +4,7 @@
 add_library(taberna_postproc STATIC morph.c sheet_repair.c topo_surgery.c)
 target_include_directories(taberna_postproc PUBLIC ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(taberna_postproc PUBLIC taberna_eval taberna_topo)
+
+if(OpenMP_C_FOUND)
+  target_link_libraries(taberna_postproc PUBLIC OpenMP::OpenMP_C)
+endif()

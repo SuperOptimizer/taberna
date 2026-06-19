@@ -34,6 +34,7 @@ static int gauss_kernel(double sigma, double **kernel_out) {
 static void blur_axis(const f32 *src, f32 *dst, int nz, int ny, int nx,
                       const double *k, int r, int axis) {
   size_t nynx = (size_t)ny * nx;
+  #pragma omp parallel for schedule(static)
   for (int z = 0; z < nz; z++) {
     for (int y = 0; y < ny; y++) {
       for (int x = 0; x < nx; x++) {
@@ -151,6 +152,7 @@ int st_sheet_detect(const f32 *vol, int nz, int ny, int nx,
   gaussian_blur(work, nz, ny, nx, p.sigma_grad, scratch);
 
   // gradients (central differences, replicate borders) -> tensor outer products
+  #pragma omp parallel for schedule(static)
   for (int z = 0; z < nz; z++) {
     for (int y = 0; y < ny; y++) {
       for (int x = 0; x < nx; x++) {
@@ -175,6 +177,7 @@ int st_sheet_detect(const f32 *vol, int nz, int ny, int nx,
   gaussian_blur(jxz, nz, ny, nx, p.sigma_tensor, scratch);
   gaussian_blur(jyz, nz, ny, nx, p.sigma_tensor, scratch);
 
+  #pragma omp parallel for schedule(static)
   for (size_t i = 0; i < n; i++) {
     double A[3][3] = {
         {jxx[i], jxy[i], jxz[i]},

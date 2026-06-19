@@ -16,3 +16,7 @@ find_library(M_LIB m)
 if(M_LIB)
   target_link_libraries(taberna_segmentation PUBLIC ${M_LIB})
 endif()
+
+if(OpenMP_C_FOUND)
+  target_link_libraries(taberna_segmentation PUBLIC OpenMP::OpenMP_C)
+endif()

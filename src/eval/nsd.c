@@ -48,6 +48,7 @@ static const float NSD_AREA[256] = {
 static void code_map(const u8 *m, int nz, int ny, int nx, u8 *code) {
   size_t nynx = (size_t)ny * nx;
   #define MM(z,y,x) (((z)>=0&&(y)>=0&&(x)>=0)? (m[IDX(z,y,x)]!=0):0)
+  #pragma omp parallel for schedule(static)
   for (int z=0; z<nz; z++) for (int y=0; y<ny; y++) for (int x=0; x<nx; x++) {
     int c = 128*MM(z-1,y-1,x-1) + 64*MM(z-1,y-1,x) + 32*MM(z-1,y,x-1) + 16*MM(z-1,y,x)
           +   8*MM(z,  y-1,x-1) +  4*MM(z,  y-1,x) +  2*MM(z,  y,x-1) +  1*MM(z,  y,x);
