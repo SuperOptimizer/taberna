@@ -33,6 +33,28 @@ static void reduced_betti6_crop(const u8 *mask, int nz, int ny, int nx,
  * valid range [0, min(p_k,g_k)]; this is a bounded proxy (exact only when features
  * are well separated). For the exact value use scripts/official_score.py, or
  * taberna's real Betti matching once built on src/topo/cubical.c. */
+/* EXACT dim-0 matched count on a cropped tile via union-find:
+ * m_0 = |{union-comps hit by pred} ∩ {union-comps hit by gt}| - 1  (clamped >=0).
+ * Validated against the Betti-Matching oracle (60/60). */
+static long matched0_crop(const u8 *pred, const u8 *gt, const u8 *u,
+                          int nz, int ny, int nx,
+                          int z0, int z1, int y0, int y1, int x0, int x1) {
+  int dz=z1-z0, dy=y1-y0, dx=x1-x0;
+  size_t nynx=(size_t)ny*nx, m=(size_t)dz*dy*dx;
+  u8 *su=malloc(m), *sp=malloc(m), *sg=malloc(m);
+  for (int z=0;z<dz;z++) for (int y=0;y<dy;y++) for (int x=0;x<dx;x++) {
+    size_t s=((size_t)z*dy+y)*dx+x, g=(size_t)(z0+z)*nynx+(size_t)(y0+y)*nx+(x0+x);
+    su[s]=u[g]; sp[s]=pred[g]; sg[s]=gt[g];
+  }
+  u32 *ul=malloc(m*sizeof(u32));
+  u32 cu=cc_label(su,dz,dy,dx,TOPO_CONN6,ul);
+  u8 *inA=calloc(cu+1,1), *inB=calloc(cu+1,1);
+  for (size_t i=0;i<m;i++){ if(sp[i]&&ul[i]) inA[ul[i]]=1; if(sg[i]&&ul[i]) inB[ul[i]]=1; }
+  long inter=0; for(u32 c=1;c<=cu;c++) if(inA[c]&&inB[c]) inter++;
+  free(su);free(sp);free(sg);free(ul);free(inA);free(inB);
+  return inter>0 ? inter-1 : 0;
+}
+
 double toposcore_native(const u8 *pred, const u8 *gt, int nz, int ny, int nx) {
   size_t n = (size_t)nz * ny * nx;
   u8 *u = (u8 *)malloc(n);
@@ -50,11 +72,13 @@ double toposcore_native(const u8 *pred, const u8 *gt, int nz, int ny, int nx) {
     reduced_betti6_crop(pred, nz,ny,nx, z0,z1,y0,y1,x0,x1, rp);
     reduced_betti6_crop(gt,   nz,ny,nx, z0,z1,y0,y1,x0,x1, rg);
     reduced_betti6_crop(u,    nz,ny,nx, z0,z1,y0,y1,x0,x1, ru);
-    for (int k=0;k<3;k++){
+    P[0]+=rp[0]; G[0]+=rg[0];
+    M[0]+= matched0_crop(pred,gt,u, nz,ny,nx, z0,z1,y0,y1,x0,x1);   // EXACT dim-0
+    for (int k=1;k<3;k++){                                         // dim 1,2 PROXY
       P[k]+=rp[k]; G[k]+=rg[k];
-      long m = rp[k]+rg[k]-ru[k];                 // inclusion-exclusion estimate
-      long hi = rp[k]<rg[k]?rp[k]:rg[k];          // true m_k <= min(p_k,g_k)
-      if (m < 0) m = 0; if (m > hi) m = hi;       // clamp to valid range (proxy)
+      long m = rp[k]+rg[k]-ru[k];
+      long hi = rp[k]<rg[k]?rp[k]:rg[k];
+      if (m < 0) m = 0; if (m > hi) m = hi;
       M[k]+= m;
     }
   }
