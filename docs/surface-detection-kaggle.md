@@ -155,17 +155,31 @@ volume / ~15% of the valid region. The metric must mask out label-2 voxels.
   b0 1→2). `tools/run_surface.c` — end-to-end classical baseline (CT → sheetness →
   threshold → dust/median/fill → ignore-aware score).
 
-## First classical baseline (one 320³ cube, untuned)
+## Classical detector progress (one 320³ cube, scroll 26002)
 
-`run_surface` with structure-tensor sheetness: thresh 0.5 → 80% of voxels fire
-(Dice 0.27); thresh 0.95 → 6.8% but misplaced (Dice 0.11, b0=290). **Finding:**
-raw sheetness is a *thick* response over whole sheet bodies and fires across the
-(entirely layered) scroll, while the label is the thin *smoothed centerline*. The
-front-end needs **ridge non-max-suppression to centerlines along the sheet normal
-+ scale tuning (sigma_grad/sigma_tensor) + intensity gating**, not just a
-threshold. The plumbing (IO/metric/postproc) is verified; the detector is the open
-work. *Pending:* PCA height-map repair, multi-threshold unmerge, 256-entry 2×2×2
-watertight LUT, the official composite metric (persistent-homology Betti matching).
+GT surface = 1.40M voxels = 14.8% of the valid (non-ignore) region.
+
+1. **Raw sheetness threshold** (`run_surface`): thresh 0.5 → 80% fire (Dice 0.27);
+   0.95 → misplaced (Dice 0.11). Sheetness is a *thick* response over whole sheet
+   bodies and fires across the entirely-layered scroll; the label is the thin
+   *smoothed centerline*.
+2. **Ridge NMS** (`src/segmentation/ridge.c`, `surface_sweep`) — keep a voxel only
+   if its CT intensity is a local max along the structure-tensor normal (x ± step·n,
+   trilinear). Collapses the band to a ~1-voxel medial ridge. **Surface Dice 0.42 →
+   0.68** (best s_min≈0.3, i_min≈80), predicted volume ~1.0M ≈ GT density. But the
+   1-voxel ridge is porous: b1 ≈ 40k, and volumetric Dice only ~0.17.
+3. **Thickness + median cleanup** (`ridge_clean`): the iterated median erodes a
+   thin sheet away (must dilate first). dilate(1) + median(3) → Dice 0.17→**0.26**,
+   Surface Dice holds **0.67**, **b1 39.6k → 3.2k** (10× topology improvement).
+
+Net arc this session: Surface Dice **0.23 → 0.68**, Dice **0.11 → 0.26**, topology
+controllable. Residual gap vs the ~0.60 leaderboard is detector *precision*: the
+dilated ridge is ~3 voxels vs the label's ~1.5, capping Dice. **Next detector
+work:** multi-scale ridge response; connect porous ridges by walking along the
+tensor in-plane orientation instead of blunt dilation; intensity normalization;
+per-scroll param fit. **Next post-proc:** PCA height-map repair, multi-threshold
+unmerge, 256-entry 2×2×2 watertight LUT. **Next metric:** official composite
+(persistent-homology Betti matching) for a directly-comparable score.
 
 ## Implications for taberna (concrete)
 

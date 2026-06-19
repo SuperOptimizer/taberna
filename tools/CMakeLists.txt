@@ -24,3 +24,11 @@ target_link_libraries(test_topo PRIVATE taberna_eval taberna_postproc)
 add_executable(run_surface run_surface.c)
 target_link_libraries(run_surface PRIVATE
   taberna_io taberna_segmentation taberna_postproc taberna_eval)
+
+add_executable(surface_sweep surface_sweep.c)
+target_link_libraries(surface_sweep PRIVATE
+  taberna_io taberna_segmentation taberna_postproc taberna_eval)
+
+add_executable(ridge_clean ridge_clean.c)
+target_link_libraries(ridge_clean PRIVATE
+  taberna_io taberna_segmentation taberna_postproc taberna_eval)
