@@ -29,11 +29,12 @@ typedef struct {
                        // pitch). Turns the Laplacian smoother into a gradient-matching
                        // Poisson solve so level sets follow the ACTUAL sheets, not a
                        // radial assumption. See winding_normal_forcing().
-  f32 anchor_lambda;   // default 0. When >0 (with forcing), softly pull the solution
-                       // toward the initial (analytic) field. The normal-divergence
-                       // Poisson alone collapses the spiral monodromy (winding number
-                       // is topological, carried by the angular init); this anchor
-                       // preserves the wrap count while the forcing follows sheets.
+  f32 anchor_lambda;   // default 0. When >0, softly pull the solution toward the
+                       // initial field. Two uses: (1) with `forcing`, preserves the
+                       // spiral monodromy a normal-divergence solve would collapse;
+                       // (2) per-tile NATIVE re-solve warm-started from a global coarse
+                       // winding — the anchor keeps each tile locked to the global
+                       // coordinate (no seams) while local LOD0 detail refines it.
 } wfield_params;
 
 wfield_params winding_default_params(void);

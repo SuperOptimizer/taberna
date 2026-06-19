@@ -44,7 +44,7 @@ int winding_field_solve(const u8 *mask, int nz, int ny, int nx,
   // pulled toward (preserves the angular monodromy the forcing would otherwise wash
   // out). Only allocated when actually used.
   f32 *anchor = NULL;
-  double lam = (p.forcing && p.anchor_lambda > 0.0f) ? (double)p.anchor_lambda : 0.0;
+  double lam = (p.anchor_lambda > 0.0f) ? (double)p.anchor_lambda : 0.0;
   if (lam > 0.0) {
     anchor = (f32 *)malloc(n * sizeof(f32));
     if (!anchor) return -1;
