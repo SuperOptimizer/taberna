@@ -16,3 +16,10 @@ u8 *tiff_load_u8(const char *path, int *nz, int *ny, int *nx) {
   tiff_volume_free(&v);
   return data;
 }
+
+int tiff_save_u8(const char *path, const u8 *data, int nz, int ny, int nx) {
+  tiff_volume v = { .width = (unsigned)nx, .height = (unsigned)ny,
+                    .depth = (unsigned)nz, .channels = 1, .type = TIFF_U8,
+                    .data = (void *)data };
+  return tiff_write_volume(path, &v);
+}

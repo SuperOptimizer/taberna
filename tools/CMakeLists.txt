@@ -40,3 +40,10 @@ target_link_libraries(st_sweep PRIVATE
 add_executable(ridge_connect ridge_connect.c)
 target_link_libraries(ridge_connect PRIVATE
   taberna_io taberna_segmentation taberna_postproc taberna_eval)
+
+add_executable(surface_predict surface_predict.c)
+target_link_libraries(surface_predict PRIVATE
+  taberna_io taberna_segmentation taberna_postproc taberna_eval)
+
+add_executable(pers_dump pers_dump.c)
+target_link_libraries(pers_dump PRIVATE taberna_topo)

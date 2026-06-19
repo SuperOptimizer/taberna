@@ -15,4 +15,8 @@
  * or non-u8 volumes (the surface-detection data is neither). */
 u8 *tiff_load_u8(const char *path, int *nz, int *ny, int *nx);
 
+/* Save a z-major u8 volume as a multi-page TIFF (what the official metric reads).
+ * Returns 0 on success. */
+int tiff_save_u8(const char *path, const u8 *data, int nz, int ny, int nx);
+
 #endif // TABERNA_TIFF_VOL_H

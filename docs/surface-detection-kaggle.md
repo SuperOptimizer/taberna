@@ -206,6 +206,56 @@ competitive, since the leaderboard blend may weight tolerance differently than o
 volumetric Dice. **Other open post-proc:** PCA height-map repair, multi-threshold
 unmerge, 256-entry 2×2×2 watertight LUT.
 
+## The official metric (obtained from the team) + native reimplementation
+
+The team's metric library (`topological-metrics-kaggle`, in the archive) is the
+ground truth:
+```
+Score = 0.30*TopoScore + 0.35*SurfaceDice@2 + 0.35*VOI_score
+  VOI_score   = 1/(1 + 0.3*VOI)         # cc3d 26-conn instances, union-FG voxels
+  SurfaceDice = Google surface_distance NSD (area-weighted), tol=2, spacing 1
+  TopoScore   = weighted Topo-F1 (2*m_k/(p_k+g_k), w=0.34/0.33/0.33) from
+                Betti-Matching-3D, on 8 octant tiles, masks inverted
+  ignore_label=2, fg = "!= 0"
+```
+Built it on aarch64 (py3.12 venv + Betti-Matching-3D C++) as an oracle. Bridge:
+`scripts/official_score.py` scores a taberna prediction TIFF.
+
+**taberna's first official score (one 320³ cube): 0.4406.** Breakdown:
+SurfaceDice 0.612, VOI_score 0.647 (VOI 1.82), **TopoScore 0.000**. So our
+classical detector's surface placement and instance consistency are already
+competitive (~0.6 each); the *entire* gap to the ~0.60 leaderboard is topology —
+our 6304 tunnels annihilate TopoScore. Topology cleanup is the lever.
+
+Native reimplementation status (`src/eval/score.c`, `src/eval/topo.c`,
+`src/topo/`):
+- **VOI — bit-exact.** Native C gives VOI_score 0.6468 / VOI 1.8203, matching the
+  official to the digit (26-conn cc, union-FG voxels, `1/(1+0.3·VOI)`).
+- **TopoScore — proven reducible without persistent homology.** For binary masks
+  (all the metric ever sees), Betti matching = inclusion-exclusion on reduced Betti
+  numbers: `p_k=rb_k(pred)`, `g_k=rb_k(gt)`, `m_k=rb_k(pred)+rb_k(gt)−rb_k(pred∪gt)`
+  (reduced = b_k, minus 1 for k=0). Validated against the Betti-Matching oracle on
+  every case. Connectivity is **6-conn foreground / 26-conn background**
+  (corner-touching voxels disconnected) — pinned via diagonal tests;
+  `betti_numbers_6` implements it. Plus the official 2×2×2 tiling. (Wiring the full
+  tiled TopoScore into score.c is the remaining metric step.)
+- **SurfaceDice** — still our Chebyshev proxy; the exact Google NSD (area-weighted
+  surfel table + distance transform) is a bounded port, pending.
+
+## Native persistent homology (`src/topo/cubical.{h,c}`)
+
+For the *science* (not the metric): a from-scratch cubical PH engine — sublevel
+T-construction (voxels=vertices, 6-conn, matching the oracle), generic Z/2
+boundary-matrix reduction → persistence diagram (birth/death per dim, essentials).
+**Validated against Betti-Matching-3D: 50/50 random binary volumes (Betti counts,
+all dims) and 40/40 grayscale volumes (exact birth/death persistence diagrams).**
+v0 is O(cells)≈8N memory (small/cropped/octant volumes); fast paths (union-find
+dim0, cubical dim1/2) and Betti *matching* are next. Headline application:
+**persistence-based topological simplification of the continuous sheetness field** —
+remove low-persistence tunnels/holes before binarizing, attacking the topology
+problem at the source (helps both the score and unrolling). `tools/pers_dump`
+dumps a diagram for validation.
+
 ## Implications for taberna (concrete)
 
 1. **Adopt this competition as taberna's surface-detection benchmark.** Same data,

@@ -164,6 +164,55 @@ topo_betti betti_numbers(const u8 *mask, int nz, int ny, int nx) {
   return r;
 }
 
+/* Euler characteristic of the (6-conn fg) voxel-as-vertex cubical complex:
+ * chi = V - E + F - C  (vertices, 6-adjacency edges, unit squares, unit cubes). */
+static long euler_characteristic_6(const u8 *mask, int nz, int ny, int nx) {
+  size_t nynx = (size_t)ny * nx;
+  long V = 0, E = 0, F = 0, C = 0;
+  #define M(z,y,x) (mask[IDX(z,y,x)] != 0)
+  for (int z = 0; z < nz; z++)
+    for (int y = 0; y < ny; y++)
+      for (int x = 0; x < nx; x++) {
+        if (!M(z,y,x)) continue;
+        V++;
+        if (x+1<nx && M(z,y,x+1)) E++;
+        if (y+1<ny && M(z,y+1,x)) E++;
+        if (z+1<nz && M(z+1,y,x)) E++;
+        if (x+1<nx && y+1<ny && M(z,y,x+1) && M(z,y+1,x) && M(z,y+1,x+1)) F++;          // xy
+        if (x+1<nx && z+1<nz && M(z,y,x+1) && M(z+1,y,x) && M(z+1,y,x+1)) F++;          // xz
+        if (y+1<ny && z+1<nz && M(z,y+1,x) && M(z+1,y,x) && M(z+1,y+1,x)) F++;          // yz
+        if (x+1<nx && y+1<ny && z+1<nz &&
+            M(z,y,x+1)&&M(z,y+1,x)&&M(z,y+1,x+1)&&M(z+1,y,x)&&M(z+1,y,x+1)&&M(z+1,y+1,x)&&M(z+1,y+1,x+1)) C++;
+      }
+  #undef M
+  return V - E + F - C;
+}
+
+topo_betti betti_numbers_6(const u8 *mask, int nz, int ny, int nx) {
+  size_t nynx = (size_t)ny * nx, n = (size_t)nz * nynx;
+  topo_betti r = {0,0,0,0};
+  u32 *lab = (u32 *)malloc(n * sizeof(u32));
+  r.b0 = (long)cc_label(mask, nz, ny, nx, TOPO_CONN6, lab);    // 6-conn foreground
+  u8 *bg = (u8 *)malloc(n);
+  for (size_t i = 0; i < n; i++) bg[i] = mask[i] ? 0 : 1;
+  u32 nbg = cc_label(bg, nz, ny, nx, TOPO_CONN26, lab);        // 26-conn background
+  if (nbg) {
+    u8 *touch = (u8 *)calloc(nbg + 1, 1);
+    for (int z = 0; z < nz; z++)
+      for (int y = 0; y < ny; y++)
+        for (int x = 0; x < nx; x++) {
+          if (z && z!=nz-1 && y && y!=ny-1 && x && x!=nx-1) continue;
+          u32 l = lab[IDX(z,y,x)]; if (l) touch[l] = 1;
+        }
+    for (u32 c = 1; c <= nbg; c++) if (!touch[c]) r.b2++;
+    free(touch);
+  }
+  free(bg); free(lab);
+  r.chi = euler_characteristic_6(mask, nz, ny, nx);
+  r.b1 = r.b0 + r.b2 - r.chi;
+  return r;
+}
+
 long region_b1(const u8 *mask, int nz, int ny, int nx,
                int z0, int y0, int x0, int dz, int dy, int dx) {
   if (z0 < 0) { dz += z0; z0 = 0; }

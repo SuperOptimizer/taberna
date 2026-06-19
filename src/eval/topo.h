@@ -43,6 +43,14 @@ typedef struct {
 
 topo_betti betti_numbers(const u8 *mask, int nz, int ny, int nx);
 
+/* Betti numbers under the (6-conn foreground, 26-conn background) pairing — the
+ * convention used by the Betti-Matching-3D cubical complex (corner-touching
+ * voxels are NOT connected). b0 = 6-conn components; b2 = enclosed 26-conn
+ * background cavities; chi via the voxel-as-vertex cubical complex (V−E+F−C with
+ * 6-adjacency edges, unit-square 2-cells, unit-cube 3-cells); b1 = b0+b2−chi.
+ * This is what the official TopoScore needs (see src/eval/score.c). */
+topo_betti betti_numbers_6(const u8 *mask, int nz, int ny, int nx);
+
 /* Tunnel screen: does the sub-box have nontrivial 1-cycles (b1 > 0)?  This is the
  * cheap per-window check the top solutions used to localize repairs. Returns b1 of
  * the cropped region. (z0..z0+dz) etc. clamped to the volume. */
