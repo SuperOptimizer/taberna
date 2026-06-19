@@ -41,8 +41,10 @@ static void iv_xor(ivec *dst, const ivec *src) {
   free(dst->a); *dst = out;
 }
 
-pers_pair *cubical_persistence(const f32 *field, int nz, int ny, int nx, int *npairs) {
+static pers_pair *persistence_core(const f32 *field, int nz, int ny, int nx,
+                                   int *npairs, pers_feat **feats_out) {
   *npairs = 0;
+  pers_feat *feats = NULL;
   size_t N = (size_t)nz * ny * nx;
   const int xs = 1, ys = nx, zs = nx * ny;
   #define V(z,y,x) ((size_t)(z)*zs + (size_t)(y)*ys + (x))
@@ -81,6 +83,7 @@ pers_pair *cubical_persistence(const f32 *field, int nz, int ny, int nx, int *np
   for (size_t i=0;i<nc;i++) low2col[i] = -1;
   char *killed = calloc(nc, 1);
   pers_pair *pairs = malloc(nc * sizeof(pers_pair)); int np = 0;
+  if (feats_out) feats = malloc(nc * sizeof(pers_feat));
 
   for (size_t j=0;j<nc;j++) {
     int gid = cells[j].gid, dim = cells[j].dim;
@@ -121,6 +124,11 @@ pers_pair *cubical_persistence(const f32 *field, int nz, int ny, int nx, int *np
       col[j] = c;                        // keep for future XORs
       killed[l] = 1;
       if (cells[j].val > cells[l].val) {  // off-diagonal => real feature
+        if (feats) {  // representative cycle = the reduced column's cells (dim = birth dim)
+          feats[np].dim=cells[l].dim; feats[np].birth=cells[l].val; feats[np].death=cells[j].val;
+          feats[np].ncells=c.n; feats[np].cells=malloc((c.n?c.n:1)*sizeof(int));
+          for (int t=0;t<c.n;t++) feats[np].cells[t]=cells[c.a[t]].gid;
+        }
         pairs[np].dim = cells[l].dim; pairs[np].birth = cells[l].val; pairs[np].death = cells[j].val; np++;
       }
     } else {
@@ -131,6 +139,8 @@ pers_pair *cubical_persistence(const f32 *field, int nz, int ny, int nx, int *np
   // essential iff it is a birth and never killed (never a death's pivot row).
   for (size_t i=0;i<nc;i++)
     if (col[i].n==0 && !killed[i]) {
+      if (feats) { feats[np].dim=cells[i].dim; feats[np].birth=cells[i].val;
+                   feats[np].death=TOPO_INF; feats[np].ncells=0; feats[np].cells=NULL; }
       pairs[np].dim = cells[i].dim; pairs[np].birth = cells[i].val; pairs[np].death = TOPO_INF; np++;
     }
 
@@ -140,5 +150,17 @@ pers_pair *cubical_persistence(const f32 *field, int nz, int ny, int nx, int *np
   #undef MAX2
   #undef ADD
   *npairs = np;
+  if (feats_out) *feats_out = feats;
   return pairs;
+}
+
+pers_pair *cubical_persistence(const f32 *field, int nz, int ny, int nx, int *npairs) {
+  return persistence_core(field, nz, ny, nx, npairs, NULL);
+}
+
+pers_feat *cubical_features(const f32 *field, int nz, int ny, int nx, int *nfeat) {
+  pers_feat *feats = NULL;
+  pers_pair *pairs = persistence_core(field, nz, ny, nx, nfeat, &feats);
+  free(pairs);   // feats carry the same (dim,birth,death) plus cycles
+  return feats;
 }

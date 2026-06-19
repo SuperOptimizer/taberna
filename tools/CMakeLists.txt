@@ -75,3 +75,10 @@ target_link_libraries(surface_ced PRIVATE
 add_executable(surface_trace surface_trace.c)
 target_link_libraries(surface_trace PRIVATE
   taberna_io taberna_segmentation taberna_postproc taberna_eval)
+
+add_executable(test_features test_features.c)
+target_link_libraries(test_features PRIVATE taberna_topo)
+
+add_executable(surface_pipeline surface_pipeline.c)
+target_link_libraries(surface_pipeline PRIVATE
+  taberna_io taberna_segmentation taberna_postproc taberna_eval taberna_topo)

@@ -39,4 +39,15 @@ typedef struct {
 pers_pair *cubical_persistence(const f32 *field, int nz, int ny, int nx,
                                int *npairs);
 
+/* A persistence feature with its representative cycle (the reduced boundary
+ * column at death): for dim 1, `cells` are the global EDGE ids forming the loop
+ * around a tunnel; for dim 0, vertices; for dim 2, faces. `ncells`==0 for
+ * essential classes. Global-id layout (decode anchor voxel = gid % (nz*ny*nx)):
+ *   vertex v: v;  edge(axis a,v): N+a*N+v;  square(normal a,v): 4N+a*N+v;  cube: 7N+v. */
+typedef struct { int dim; f32 birth, death; int ncells; int *cells; } pers_feat;
+
+/* Like cubical_persistence but also returns a representative cycle per OFF-DIAGONAL
+ * feature. Caller frees each feat[i].cells and the returned array. */
+pers_feat *cubical_features(const f32 *field, int nz, int ny, int nx, int *nfeat);
+
 #endif // TABERNA_CUBICAL_H
