@@ -5,7 +5,7 @@
 #   partition.c    — Mutex Watershed signed-graph partition into per-wrap segments
 #   ridge.c        — centerline extraction by NMS along the sheet normal
 #   stitch.c       — cross-brick label stitching (delayed-merge primitive)
-add_library(taberna_segmentation STATIC snic.c sheet_tensor.c ridge.c ced.c affinity.c partition.c stitch.c)
+add_library(taberna_segmentation STATIC snic.c sheet_tensor.c ridge.c ced.c trace.c affinity.c partition.c stitch.c)
 target_include_directories(taberna_segmentation PUBLIC
   ${CMAKE_CURRENT_SOURCE_DIR}      # legacy: snic.h included as "snic.h"
   ${CMAKE_SOURCE_DIR}/src)         # new: "segmentation/..", "common/.." style
