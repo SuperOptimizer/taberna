@@ -35,9 +35,9 @@ int main(int argc,char**argv){
   if(med>0) majority_filter(q,q,nz,ny,nx,med);
   free(volf);free(sheet);free(normal);free(img);
 
-  fprintf(stderr,"sheet repair...\n");
+  fprintf(stderr,"windowed sheet repair...\n");
   u8*rep=malloc(n);
-  sheet_repair(q,rep,nz,ny,nx,minc);
+  sheet_repair_windowed(q,rep,nz,ny,nx, 48, 16, minc);
 
   if(tiff_save_u8(argv[3],rep,nz,ny,nx)!=0){fprintf(stderr,"write fail\n");return 1;}
   comp_score s=competition_score(rep,lab,nz,ny,nx,2,1,2);

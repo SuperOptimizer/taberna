@@ -103,18 +103,20 @@ void sheet_repair(const u8 *in, u8 *out, int nz, int ny, int nx, int min_voxels)
     u8 *known=calloc(G,1);
     for (size_t g=0;g<G;g++) if(cnt[g]){ h[g]/=cnt[g]; known[g]=1; }
 
-    // --- flood-remove outside: BFS from border through non-known cells ---
-    u8 *outside=calloc(G,1);
-    int *stk=malloc(G*sizeof(int)); size_t sp=0;
-    #define PUSH(gi,gj) do{ size_t g=(size_t)(gi)*nv+(gj); if(!known[g]&&!outside[g]){outside[g]=1;stk[sp++]=(int)g;} }while(0)
-    for (int gi=0;gi<nu;gi++){ PUSH(gi,0); PUSH(gi,nv-1); }
-    for (int gj=0;gj<nv;gj++){ PUSH(0,gj); PUSH(nu-1,gj); }
-    while (sp){ int g=stk[--sp]; int gi=g/nv,gj=g%nv;
-      if(gi>0)PUSH(gi-1,gj); if(gi<nu-1)PUSH(gi+1,gj); if(gj>0)PUSH(gi,gj-1); if(gj<nv-1)PUSH(gi,gj+1); }
-    #undef PUSH
-    free(stk);
-    // domain = known OR (interior gap = not outside)
-    u8 *dom=malloc(G); for(size_t g=0;g<G;g++) dom[g]= known[g] || !outside[g];
+    // --- domain = morphological closing of `known` (box radius R): fills porosity
+    //     gaps up to ~2R as interior while keeping the sheet outline. This is the
+    //     key fix vs flood-from-border, which wrongly treated border-connected
+    //     porosity as "outside". ---
+    int R=6;
+    u8 *dil=calloc(G,1), *dom=calloc(G,1);
+    for (int gi=0;gi<nu;gi++) for(int gj=0;gj<nv;gj++){ if(!known[(size_t)gi*nv+gj]) continue;
+      for(int di=-R;di<=R;di++){int ii=gi+di; if(ii<0||ii>=nu)continue;
+        for(int dj=-R;dj<=R;dj++){int jj=gj+dj; if(jj<0||jj>=nv)continue; dil[(size_t)ii*nv+jj]=1; }}}
+    for (int gi=0;gi<nu;gi++) for(int gj=0;gj<nv;gj++){ // erode dil -> dom
+      int keep=1; for(int di=-R;di<=R&&keep;di++){int ii=gi+di; if(ii<0||ii>=nu){keep=0;break;}
+        for(int dj=-R;dj<=R;dj++){int jj=gj+dj; if(jj<0||jj>=nv||!dil[(size_t)ii*nv+jj]){keep=0;break;}}}
+      dom[(size_t)gi*nv+gj]=keep; }
+    free(dil);
 
     // --- Laplace inpaint interior gaps (Gauss-Seidel) ---
     for (int it=0; it<300; it++){ double md=0;
@@ -139,7 +141,30 @@ void sheet_repair(const u8 *in, u8 *out, int nz, int ny, int nx, int min_voxels)
         draw_line(out,nz,ny,nx, wz,wy,wx,
           mean[0]+uu*t1[0]+v2*t2[0]+w2*nrm[0], mean[1]+uu*t1[1]+v2*t2[1]+w2*nrm[1], mean[2]+uu*t1[2]+v2*t2[2]+w2*nrm[2]); } }
     }
-    free(h);free(cnt);free(known);free(outside);free(dom);free(U);free(Vv);free(W);
+    free(h);free(cnt);free(known);free(dom);free(U);free(Vv);free(W);
   }
   free(lab);free(sz);free(off);free(pts);
+}
+
+void sheet_repair_windowed(const u8 *in, u8 *out, int nz, int ny, int nx,
+                           int win, int overlap, int min_voxels) {
+  size_t nynx=(size_t)ny*nx, N=(size_t)nz*nynx;
+  memset(out, 0, N);
+  int stride = win - overlap; if (stride < 1) stride = 1;
+  u8 *si=malloc((size_t)win*win*win), *so=malloc((size_t)win*win*win);
+  for (int z0=0; z0<nz; z0+=stride)
+  for (int y0=0; y0<ny; y0+=stride)
+  for (int x0=0; x0<nx; x0+=stride) {
+    int dz=win<nz-z0?win:nz-z0, dy=win<ny-y0?win:ny-y0, dx=win<nx-x0?win:nx-x0;
+    if (dz<8||dy<8||dx<8) continue;
+    size_t any=0;
+    for (int z=0;z<dz;z++) for(int y=0;y<dy;y++) for(int x=0;x<dx;x++){
+      u8 v=in[(size_t)(z0+z)*nynx+(size_t)(y0+y)*nx+(x0+x)];
+      si[((size_t)z*dy+y)*dx+x]=v; any+=v; }
+    if (any < (size_t)min_voxels) continue;
+    sheet_repair(si, so, dz,dy,dx, min_voxels);
+    for (int z=0;z<dz;z++) for(int y=0;y<dy;y++) for(int x=0;x<dx;x++)
+      if (so[((size_t)z*dy+y)*dx+x]) out[(size_t)(z0+z)*nynx+(size_t)(y0+y)*nx+(x0+x)]=1;
+  }
+  free(si);free(so);
 }

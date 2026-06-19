@@ -24,4 +24,10 @@
  * writing the union into `out` (zeroed first; `in` and `out` must differ). */
 void sheet_repair(const u8 *in, u8 *out, int nz, int ny, int nx, int min_voxels);
 
+/* Windowed repair: run sheet_repair on overlapping `win`-sized blocks (stride
+ * `win-overlap`) and OR the results, so each block's sheet patch is locally planar
+ * (curved sheets break the global single-plane fit). out zeroed first. */
+void sheet_repair_windowed(const u8 *in, u8 *out, int nz, int ny, int nx,
+                           int win, int overlap, int min_voxels);
+
 #endif // TABERNA_SHEET_REPAIR_H
