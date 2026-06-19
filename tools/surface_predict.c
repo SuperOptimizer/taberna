@@ -48,11 +48,11 @@ int main(int argc, char **argv) {
   fprintf(stderr,"wrote %s\n", argv[3]);
 
   comp_score s=competition_score(pred,lab,nz,ny,nx,tol,1,2);
-  printf("=== PROXY composite (run scripts/official_score.py for the real one) ===\n");
+  printf("=== composite (TopoScore is a proxy; official_score.py for exact) ===\n");
   printf("Score        : %.4f\n", s.score);
-  printf("  TopoScore  : %.4f  (PROXY: min-match Topo-F1; real = Betti-matching)\n", s.topo_score);
-  printf("  SurfaceDice: %.4f  (PROXY: Chebyshev; real = Google surface_distance NSD)\n", s.surface_dice);
-  printf("  VOI_score  : %.4f  (exact: 1/(1+0.3*VOI), VOI=%.4f)\n", s.voi_score, s.voi);
+  printf("  TopoScore  : %.4f  (PROXY: clamped incl-excl; real = Betti-matching)\n", s.topo_score);
+  printf("  SurfaceDice: %.4f  (EXACT: native Google NSD port)\n", s.surface_dice);
+  printf("  VOI_score  : %.4f  (EXACT: 1/(1+0.3*VOI), VOI=%.4f)\n", s.voi_score, s.voi);
   printf("  pred betti : b0=%ld b1=%ld b2=%ld\n", s.pred_b0, s.pred_b1, s.pred_b2);
 
   free(pred);free(lab);

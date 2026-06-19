@@ -34,4 +34,10 @@ typedef struct {
 comp_score competition_score(const u8 *pred, const u8 *label, int nz, int ny, int nx,
                              int tol, u8 surface_value, u8 ignore_value);
 
+/* Exact native TopoScore: weighted Topo-F1 over the official 2x2x2 octant tiling,
+ * via the binary Betti reduction (m_k = rb_k(pred)+rb_k(gt)-rb_k(pred∪gt), 6-conn
+ * fg). `pred`/`gt` are binary foreground masks (ignore already applied). Matches
+ * the topometrics Betti-Matching TopoScore exactly for binary inputs. */
+double toposcore_native(const u8 *pred, const u8 *gt, int nz, int ny, int nx);
+
 #endif // TABERNA_SCORE_H

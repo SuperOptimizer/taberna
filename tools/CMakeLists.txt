@@ -47,3 +47,12 @@ target_link_libraries(surface_predict PRIVATE
 
 add_executable(pers_dump pers_dump.c)
 target_link_libraries(pers_dump PRIVATE taberna_topo)
+
+add_executable(topo_native topo_native.c)
+target_link_libraries(topo_native PRIVATE taberna_io taberna_eval)
+
+add_executable(nsd_native nsd_native.c)
+target_link_libraries(nsd_native PRIVATE taberna_io taberna_eval)
+
+add_executable(test_persist0 test_persist0.c)
+target_link_libraries(test_persist0 PRIVATE taberna_topo)

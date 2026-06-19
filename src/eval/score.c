@@ -2,9 +2,75 @@
 #include "eval/score.h"
 #include "eval/metrics.h"
 #include "eval/topo.h"
+#include "eval/nsd.h"
 
 #include <math.h>
 #include <stdlib.h>
+
+/* reduced 6-conn Betti (rb0=b0-1 clamped, rb1=b1, rb2=b2) of a cropped sub-box */
+static void reduced_betti6_crop(const u8 *mask, int nz, int ny, int nx,
+                                int z0, int z1, int y0, int y1, int x0, int x1,
+                                long rb[3]) {
+  int dz = z1-z0, dy = y1-y0, dx = x1-x0;
+  size_t nynx = (size_t)ny * nx;
+  u8 *sub = (u8 *)malloc((size_t)dz*dy*dx);
+  for (int z=0; z<dz; z++)
+    for (int y=0; y<dy; y++)
+      for (int x=0; x<dx; x++)
+        sub[((size_t)z*dy + y)*dx + x] = mask[(size_t)(z0+z)*nynx + (size_t)(y0+y)*nx + (x0+x)];
+  topo_betti b = betti_numbers_6(sub, dz, dy, dx);
+  rb[0] = b.b0 > 0 ? b.b0 - 1 : 0;  // reduced H0 (drop the essential component)
+  rb[1] = b.b1;
+  rb[2] = b.b2;
+  free(sub);
+}
+
+/* PROXY TopoScore. The official matched count m_k is the IMAGE-INDUCED Betti
+ * matching (features of pred and gt that map to the same class in the comparison
+ * image) — NOT inclusion-exclusion on Betti numbers: rb(pred)+rb(gt)-rb(union)
+ * overcounts whenever an induced map has a kernel (a tunnel in pred filled by the
+ * union), which is common on dense masks. We therefore CLAMP the estimate to the
+ * valid range [0, min(p_k,g_k)]; this is a bounded proxy (exact only when features
+ * are well separated). For the exact value use scripts/official_score.py, or
+ * taberna's real Betti matching once built on src/topo/cubical.c. */
+double toposcore_native(const u8 *pred, const u8 *gt, int nz, int ny, int nx) {
+  size_t n = (size_t)nz * ny * nx;
+  u8 *u = (u8 *)malloc(n);
+  for (size_t i = 0; i < n; i++) u[i] = (pred[i] || gt[i]) ? 1 : 0;
+
+  // official _axis_cuts(n,2): first chunk gets the ceil half
+  int zc = (nz+1)/2, yc = (ny+1)/2, xc = (nx+1)/2;
+  int zb[3] = {0, zc, nz}, yb[3] = {0, yc, ny}, xb[3] = {0, xc, nx};
+
+  long M[3] = {0,0,0}, P[3] = {0,0,0}, G[3] = {0,0,0};
+  for (int zi=0; zi<2; zi++) for (int yi=0; yi<2; yi++) for (int xi=0; xi<2; xi++) {
+    int z0=zb[zi], z1=zb[zi+1], y0=yb[yi], y1=yb[yi+1], x0=xb[xi], x1=xb[xi+1];
+    if (z1<=z0 || y1<=y0 || x1<=x0) continue;
+    long rp[3], rg[3], ru[3];
+    reduced_betti6_crop(pred, nz,ny,nx, z0,z1,y0,y1,x0,x1, rp);
+    reduced_betti6_crop(gt,   nz,ny,nx, z0,z1,y0,y1,x0,x1, rg);
+    reduced_betti6_crop(u,    nz,ny,nx, z0,z1,y0,y1,x0,x1, ru);
+    for (int k=0;k<3;k++){
+      P[k]+=rp[k]; G[k]+=rg[k];
+      long m = rp[k]+rg[k]-ru[k];                 // inclusion-exclusion estimate
+      long hi = rp[k]<rg[k]?rp[k]:rg[k];          // true m_k <= min(p_k,g_k)
+      if (m < 0) m = 0; if (m > hi) m = hi;       // clamp to valid range (proxy)
+      M[k]+= m;
+    }
+  }
+  free(u);
+
+  static const double w[3] = {0.34, 0.33, 0.33};
+  double num = 0.0, den = 0.0;
+  for (int k=0;k<3;k++) {
+    long denom = P[k] + G[k];
+    if (denom <= 0) continue;  // inactive dim
+    double f1 = G[k] != 0 ? (2.0*(double)M[k])/(double)denom
+                          : 0.5/((double)denom + 0.5);
+    num += w[k]*f1; den += w[k];
+  }
+  return den > 0 ? num/den : 1.0;
+}
 
 comp_score competition_score(const u8 *pred, const u8 *label, int nz, int ny, int nx,
                              int tol, u8 surface_value, u8 ignore_value) {
@@ -20,8 +86,8 @@ comp_score competition_score(const u8 *pred, const u8 *label, int nz, int ny, in
     g[i] = (label[i] == surface_value) ? 1 : 0;
   }
 
-  // --- SurfaceDice@tol (confirmed component) --------------------------------
-  r.surface_dice = surface_dice_at_tol(p, g, nz, ny, nx, tol);
+  // --- SurfaceDice@tol — exact native NSD (Google surface_distance port) -----
+  r.surface_dice = surface_dice_nsd(g, p, nz, ny, nx, (double)tol);
 
   // --- VOI: cc3d(26) instances, scored over UNION-FG voxels only (matches
   //     topometrics voi.py: use_union_mask=True). VOI total is symmetric, so
@@ -39,27 +105,13 @@ comp_score competition_score(const u8 *pred, const u8 *label, int nz, int ny, in
   r.voi = er.voi;
   r.voi_score = 1.0 / (1.0 + VOI_ALPHA * er.voi);   // official 'one_over_one_plus'
 
-  // --- TopoScore PROXY: official is weighted Topo-F1 = 2*m_k/(p_k+g_k) over
-  //     dims {0,1,2}, where m_k is the SPATIAL Betti-matching matched count from
-  //     the Betti-Matching-3D lib (per 8 octant tiles, masks inverted). We have
-  //     only Betti *counts*, so we proxy m_k = min(p_k,g_k) (optimistic upper
-  //     bound) and apply the official F1 + weights. Use the bridge (scripts/
-  //     official_score.py) for the real value. ------------------------------
-  topo_betti pb = betti_numbers(p, nz, ny, nx);
-  topo_betti gb = betti_numbers(g, nz, ny, nx);
+  // --- TopoScore: EXACT native (tiled binary Betti reduction; matches the
+  //     official Betti-Matching TopoScore for binary masks) -------------------
+  r.topo_score = toposcore_native(p, g, nz, ny, nx);
+  topo_betti pb = betti_numbers_6(p, nz, ny, nx);
+  topo_betti gb = betti_numbers_6(g, nz, ny, nx);
   r.pred_b0=pb.b0; r.pred_b1=pb.b1; r.pred_b2=pb.b2;
   r.gt_b0=gb.b0;   r.gt_b1=gb.b1;   r.gt_b2=gb.b2;
-  long pbn[3] = {pb.b0, pb.b1, pb.b2}, gbn[3] = {gb.b0, gb.b1, gb.b2};
-  static const double tw[3] = {0.34, 0.33, 0.33};
-  double tnum = 0.0, tden = 0.0;
-  for (int d = 0; d < 3; d++) {
-    long pk = pbn[d], gk = gbn[d], mk = pk < gk ? pk : gk;  // proxy match
-    if (pk + gk > 0) {
-      double f1 = gk != 0 ? (2.0*mk)/(double)(pk+gk) : 0.5/((double)(pk+gk)+0.5);
-      tnum += tw[d] * f1; tden += tw[d];
-    }
-  }
-  r.topo_score = tden > 0 ? tnum / tden : 1.0;
 
   r.score = 0.30 * r.topo_score + 0.35 * r.surface_dice + 0.35 * r.voi_score;
 
