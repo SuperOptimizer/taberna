@@ -25,6 +25,31 @@
 #include "eval/topo.h"
 #include "annotate/umbilicus.h"
 
+/* Build the radial-adjacency graph over marker voxels (recto rims OR intensity ridges)
+ * and fit a consistent winding (wind[B]=wind[A]+1 over edges), anchoring the innermost
+ * segment to 0. Returns malloc'd wind[K]; sets *residual and *nedges. */
+static double *graph_winding(const u8 *marker, const u32 *lbl, const int *cid, int K,
+                             const double *meanr, int d, double cyf, double cxf,
+                             double *residual, long *nedges){
+  long *edge=calloc((size_t)K*K,sizeof(long));
+  for(int y=0;y<d;y++)for(int x=0;x<d;x++){ size_t p=(size_t)y*d+x; if(!marker[p])continue;
+    int La=cid[lbl[p]]; if(La<0)continue;
+    double dy=y-cyf,dx=x-cxf,r=sqrt(dy*dy+dx*dx); if(r<1)continue; double uy=dy/r,ux=dx/r;
+    for(int k=2;k<40;k++){ int ny_=(int)lround(y+uy*k),nx_=(int)lround(x+ux*k);
+      if(ny_<0||ny_>=d||nx_<0||nx_>=d)break; size_t q=(size_t)ny_*d+nx_;
+      if(marker[q]){ int Lb=cid[lbl[q]]; if(Lb>=0&&Lb!=La){ edge[(size_t)La*K+Lb]++; break; } } } }
+  double *wind=calloc(K,sizeof(double));
+  int inner=0; for(int i=1;i<K;i++) if(meanr[i]<meanr[inner]) inner=i;
+  for(int it=0;it<2000;it++){ double *nw=calloc(K,sizeof(double)),*den=calloc(K,sizeof(double));
+    for(int a=0;a<K;a++)for(int b=0;b<K;b++){ long w=edge[(size_t)a*K+b]; if(w<3)continue;
+      nw[a]+=w*(wind[b]-1); den[a]+=w; nw[b]+=w*(wind[a]+1); den[b]+=w; }
+    den[inner]+=5;
+    for(int i=0;i<K;i++) if(den[i]>0) wind[i]=0.5*wind[i]+0.5*(nw[i]/den[i]); free(nw);free(den); }
+  double sres=0; long ne=0;
+  for(int a=0;a<K;a++)for(int b=0;b<K;b++){ long w=edge[(size_t)a*K+b]; if(w<3)continue; sres+=fabs(wind[b]-wind[a]-1); ne++; }
+  free(edge); if(residual)*residual=ne?sres/ne:0; if(nedges)*nedges=ne; return wind;
+}
+
 int main(int argc,char**argv){
   if(argc<8){fprintf(stderr,"usage: %s ARCHIVE OUTBASE lod z0 y0 x0 d [minseg=15]\n",argv[0]);return 2;}
   const char*path=argv[1],*base=argv[2]; int lod=atoi(argv[3]);
@@ -68,35 +93,11 @@ int main(int argc,char**argv){
   for(u32 L=1;L<=nseg;L++) if(cid[L]>=0) meanr[cid[L]]=sry[L]/sa[L];
   fprintf(stderr,"delamination segments (>=%d px): %d\n",minseg,K);
 
-  // (3) radial-adjacency graph: from each recto voxel walk outward to the next recto
-  // voxel of a DIFFERENT segment -> edge[a][b]++ ("b is one wrap outward of a").
-  long *edge=calloc((size_t)K*K,sizeof(long));
-  for(int y=0;y<d;y++)for(int x=0;x<d;x++){ size_t p=(size_t)y*d+x; if(!recto[p])continue;
-    int La=cid[sl[p]]; if(La<0)continue;
-    double dy=y-cyf,dx=x-cxf,r=sqrt(dy*dy+dx*dx); if(r<1)continue; double uy=dy/r,ux=dx/r;
-    for(int k=2;k<40;k++){ int ny_=(int)lround(y+uy*k),nx_=(int)lround(x+ux*k);
-      if(ny_<0||ny_>=d||nx_<0||nx_>=d)break; size_t q=(size_t)ny_*d+nx_;
-      if(recto[q]){ int Lb=cid[sl[q]]; if(Lb>=0&&Lb!=La){ edge[(size_t)La*K+Lb]++; break; } } } }
-
-  // (4) fit winding: relax wind[b]=wind[a]+1 over edges (weighted). Anchor innermost to 0.
-  double *wind=calloc(K,sizeof(double));
-  int inner=0; for(int i=1;i<K;i++) if(meanr[i]<meanr[inner]) inner=i;
-  for(int it=0;it<2000;it++){
-    double *nw=calloc(K,sizeof(double)); double *den=calloc(K,sizeof(double));
-    for(int a=0;a<K;a++)for(int b=0;b<K;b++){ long w=edge[(size_t)a*K+b]; if(w<3)continue;
-      nw[a]+=w*(wind[b]-1); den[a]+=w;          // a wants to be one less than b
-      nw[b]+=w*(wind[a]+1); den[b]+=w; }         // b wants to be one more than a
-    nw[inner]+=5*0.0; den[inner]+=5;             // anchor
-    for(int i=0;i<K;i++) if(den[i]>0) wind[i]=0.5*wind[i]+0.5*(nw[i]/den[i]);
-    free(nw);free(den);
-  }
-  // residual + range
-  double sres=0; long ne=0; double wmin=1e30,wmax=-1e30;
-  for(int a=0;a<K;a++)for(int b=0;b<K;b++){ long w=edge[(size_t)a*K+b]; if(w<3)continue;
-    sres+=fabs(wind[b]-wind[a]-1); ne++; }
-  for(int i=0;i<K;i++){ if(wind[i]<wmin)wmin=wind[i]; if(wind[i]>wmax)wmax=wind[i]; }
-  printf("segments=%d edges=%ld  winding %.1f..%.1f (%.0f wraps)  edge-residual=%.3f\n",
-         K,ne,wmin,wmax,wmax-wmin,ne?sres/ne:0);
+  // (3+4) radial-adjacency graph over the recto rims + winding fit (the helper)
+  double resid; long ne; double *wind=graph_winding(recto,sl,cid,K,meanr,d,cyf,cxf,&resid,&ne);
+  double wmin=1e30,wmax=-1e30; for(int i=0;i<K;i++){ if(wind[i]<wmin)wmin=wind[i]; if(wind[i]>wmax)wmax=wind[i]; }
+  printf("recto-graph: segments=%d edges=%ld  winding %.1f..%.1f (%.0f wraps)  edge-residual=%.3f\n",
+         K,ne,wmin,wmax,wmax-wmin,resid);
 
   // output: colour each delamination segment by its winding (hue cycle), on dim data
   u8*rgb=malloc(nn*3);
@@ -169,5 +170,45 @@ int main(int argc,char**argv){
   snprintf(fn,sizeof fn,"%s_seg.ppm",base);
   f=fopen(fn,"wb"); if(f){ fprintf(f,"P6\n%d %d\n255\n",d,d); fwrite(rgb,1,nn*3,f); fclose(f); }
   printf("wrote %s (sheet pieces after delamination + valley-extension cuts)\n",fn);
+
+  // (6) RIDGE-graph: extend the spiral fit into the COMPRESSED core. Intensity ridges
+  // (sheet centerlines) exist even where there is no air, so use them as graph nodes:
+  // a material voxel is a ridge if it is a local intensity max along the RADIAL direction
+  // (sheets are ~perpendicular to the radius). Same radial-adjacency graph + winding fit,
+  // now covering the air-free blocks too.
+  u8*ridge=calloc(nn,1);
+  for(int y=0;y<d;y++)for(int x=0;x<d;x++){ size_t p=(size_t)y*d+x; if(!v[p])continue;
+    double dy=y-cyf,dx=x-cxf,r=sqrt(dy*dy+dx*dx); if(r<2)continue; double uy=dy/r,ux=dx/r;
+    int iy=(int)lround(y-uy),ix=(int)lround(x-ux), oy=(int)lround(y+uy),ox=(int)lround(x+ux);
+    if(iy<0||iy>=d||ix<0||ix>=d||oy<0||oy>=d||ox<0||ox>=d)continue;
+    f32 c=vs[p],in=vs[(size_t)iy*d+ix],ou=vs[(size_t)oy*d+ox];
+    if(c>=in&&c>=ou&&c>30) ridge[p]=1; }
+  u32*rl=calloc(nn,sizeof(u32)); u32 nrseg=cc_label(ridge,1,d,d,TOPO_CONN26,rl);
+  size_t*ra=calloc((size_t)nrseg+1,sizeof(size_t)); double*rry=calloc((size_t)nrseg+1,sizeof(double));
+  for(int y=0;y<d;y++)for(int x=0;x<d;x++){ size_t p=(size_t)y*d+x; u32 L=rl[p]; if(!L)continue;
+    ra[L]++; double dy=y-cyf,dx=x-cxf; rry[L]+=sqrt(dy*dy+dx*dx); }
+  int*rcid=malloc((size_t)(nrseg+1)*sizeof(int)); int RK=0;
+  for(u32 L=1;L<=nrseg;L++) rcid[L]= (ra[L]>=(size_t)minseg)? RK++ : -1;
+  if(RK>=2){
+    double*rmeanr=calloc(RK,sizeof(double));
+    for(u32 L=1;L<=nrseg;L++) if(rcid[L]>=0) rmeanr[rcid[L]]=rry[L]/ra[L];
+    double rresid; long rne; double*rwind=graph_winding(ridge,rl,rcid,RK,rmeanr,d,cyf,cxf,&rresid,&rne);
+    double rwmin=1e30,rwmax=-1e30; for(int i=0;i<RK;i++){ if(rwind[i]<rwmin)rwmin=rwind[i]; if(rwind[i]>rwmax)rwmax=rwind[i]; }
+    // coverage: fraction of material within 6px of a ridge node (how much the core is reached)
+    size_t mat=0,cov=0; for(size_t p=0;p<nn;p++) if(v[p]) mat++;
+    printf("ridge-graph: nodes=%d edges=%ld  winding %.1f..%.1f (%.0f wraps)  edge-residual=%.3f  ridge-px=%zu\n",
+           RK,rne,rwmin,rwmax,rwmax-rwmin,rresid,(size_t)0);
+    for(size_t p=0;p<nn;p++){ int g=v[p]/4; rgb[3*p]=rgb[3*p+1]=rgb[3*p+2]=(u8)g; }
+    for(size_t p=0;p<nn;p++){ u32 L=rl[p]; if(!L||rcid[L]<0)continue; cov++;
+      double h=fmod(rwind[rcid[L]]-rwmin,6.0); if(h<0)h+=6; int hi=(int)h; double fr=h-hi;
+      int V=255,P=30,Q=(int)(255*(1-fr)),T=(int)(255*fr); u8 R,G,B;
+      switch(hi){case 0:R=V;G=T;B=P;break;case 1:R=Q;G=V;B=P;break;case 2:R=P;G=V;B=T;break;
+        case 3:R=P;G=Q;B=V;break;case 4:R=T;G=P;B=V;break;default:R=V;G=P;B=Q;}
+      rgb[3*p]=R;rgb[3*p+1]=G;rgb[3*p+2]=B; }
+    printf("  ridge nodes cover %.1f%% of material (vs delaminations only in the core)\n",100.0*cov/mat);
+    snprintf(fn,sizeof fn,"%s_ridge.ppm",base);
+    f=fopen(fn,"wb"); if(f){ fprintf(f,"P6\n%d %d\n255\n",d,d); fwrite(rgb,1,nn*3,f); fclose(f); }
+    printf("wrote %s (ridge-centerline graph winding, covers compressed core)\n",fn);
+  } else printf("ridge-graph: too few ridge segments\n");
   return 0;
 }
