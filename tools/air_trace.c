@@ -72,18 +72,43 @@ int main(int argc,char**argv){
   printf("region %dx%dx%d @lod%d (%ld,%ld,%ld): recto(green)=%ld verso(blue)=%ld\n",
          nz,d,d,lod,z0,y0,x0,nrec,nver);
 
-  // RGB overlay on the slice data: recto=green, verso=blue (outer=faint red), PPM image
   int zc=nz/2; size_t off=(size_t)zc*nynx;
+  char fn[600];
+  // (1) recto/verso overlay on the slice data
   u8*rgb=malloc(nynx*3);
   for(size_t p=0;p<nynx;p++){ size_t i=off+p;
-    int g=v[i]*2; if(g>255)g=255;                 // brighten the (faint) papyrus
-    u8 R=g,G=g,B=g;
-    if(seed[i]==3){ R=40; G=255; B=40; }           // recto = green
-    else if(seed[i]==2){ R=50; G=120; B=255; }     // verso = blue
-    else if(seed[i]==1){ R=(u8)(120+g/3); G=g/2; B=g/2; }  // outer = faint red
+    int g=v[i]*2; if(g>255)g=255; u8 R=g,G=g,B=g;
+    if(seed[i]==3){ R=40; G=255; B=40; } else if(seed[i]==2){ R=50; G=120; B=255; }
     rgb[3*p+0]=R; rgb[3*p+1]=G; rgb[3*p+2]=B; }
-  char fn[600]; snprintf(fn,sizeof fn,"%s.ppm",base);
+  snprintf(fn,sizeof fn,"%s.ppm",base);
   FILE*f=fopen(fn,"wb"); if(f){ fprintf(f,"P6\n%d %d\n255\n",d,d); fwrite(rgb,1,nynx*3,f); fclose(f);
-    printf("wrote %s (recto=GREEN verso=BLUE outer=red, on slice data)\n",fn); }
+    printf("wrote %s (recto=GREEN verso=BLUE on slice data)\n",fn); }
+
+  // (2) TRACE: connect each recto rim into a continuous sheet surface (connected
+  // component) and color each traced sheet distinctly -> individual sheets pulled out
+  // of the air structure.
+  u8*recto=malloc(nynx);
+  for(size_t p=0;p<nynx;p++) recto[p]=(seed[off+p]==3);
+  u32*sl=calloc(nynx,sizeof(u32)); u32 nsheet=cc_label(recto,1,d,d,TOPO_CONN26,sl);
+  // drop tiny fragments
+  size_t*sa=calloc((size_t)nsheet+1,sizeof(size_t));
+  for(size_t p=0;p<nynx;p++) sa[sl[p]]++;
+  long nbig=0; for(u32 L=1;L<=nsheet;L++) if(sa[L]>=20) nbig++;
+  // vivid distinct color per traced sheet on a dim-data background; dilate rims a bit
+  for(size_t p=0;p<nynx;p++){ size_t i=off+p; int g=v[i]/4; rgb[3*p+0]=rgb[3*p+1]=rgb[3*p+2]=(u8)g; }
+  for(int y=0;y<d;y++)for(int x=0;x<d;x++){ size_t p=(size_t)y*d+x; u32 L=sl[p]; if(!L||sa[L]<20)continue;
+    // bright HSV-ish color from the label
+    double h=(L*47%360)/60.0; int hi=(int)h; double fr=h-hi;
+    int vv=255,pp=40,qq=(int)(255*(1-0.85*fr))+40*0,tt=(int)(255*(0.15+0.85*fr));
+    if(qq>255)qq=255; if(tt>255)tt=255;
+    u8 R,G,B; switch(hi%6){case 0:R=vv;G=tt;B=pp;break;case 1:R=qq;G=vv;B=pp;break;
+      case 2:R=pp;G=vv;B=tt;break;case 3:R=pp;G=qq;B=vv;break;case 4:R=tt;G=pp;B=vv;break;
+      default:R=vv;G=pp;B=qq;}
+    for(int dy=-1;dy<=1;dy++)for(int dx=-1;dx<=1;dx++){int yy=y+dy,xx=x+dx;
+      if(yy<0||yy>=d||xx<0||xx>=d)continue; size_t q=(size_t)yy*d+xx;
+      rgb[3*q+0]=R;rgb[3*q+1]=G;rgb[3*q+2]=B; } }
+  snprintf(fn,sizeof fn,"%s_sheets.ppm",base);
+  f=fopen(fn,"wb"); if(f){ fprintf(f,"P6\n%d %d\n255\n",d,d); fwrite(rgb,1,nynx*3,f); fclose(f); }
+  printf("traced %ld sheet surfaces (>=20px) -> %s\n",nbig,fn);
   return 0;
 }
