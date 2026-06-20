@@ -138,3 +138,6 @@ target_link_libraries(mca_slice PRIVATE taberna_io)
 add_executable(air_trace air_trace.c)
 target_link_libraries(air_trace PRIVATE taberna_unwrap
   taberna_io taberna_postproc taberna_eval taberna_annotate)
+
+add_executable(sheet_sep sheet_sep.c)
+target_link_libraries(sheet_sep PRIVATE taberna_io taberna_eval taberna_annotate)
