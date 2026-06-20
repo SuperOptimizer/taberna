@@ -23,24 +23,31 @@
 #include "annotate/umbilicus.h"
 #include "unwrap/winding_field.h"
 
-/* Data-driven radial pitch = median spacing between consecutive sheet starts along
- * rays from the umbilicus at mid-z. This IS dr_per_winding (one sheet per wrap). Far
- * more reliable than a hardcoded constant — the real scroll's pitch is not what a
- * fixed LOD0 guess assumes. */
+/* Data-driven radial pitch = median radial spacing between consecutive sheet PEAKS
+ * (intensity local maxima) along rays from the umbilicus. The wraps are mostly in
+ * contact (the .mca masks only true vacuum as 0), so sheets are intensity maxima, not
+ * air-bounded runs — and per-ray (not angle-averaged: averaging smears the spiral).
+ * Light radial smoothing + a prominence test suppress LOD-graininess. No thresholding.
+ * This IS dr_per_winding (one sheet per wrap). */
 static double measure_pitch(const u8*v,int nz,int ny,int nx,const umbilicus*umb,double fallback){
   int z=nz/2; f32 cyf,cxf; umbilicus_center(umb,(f32)z,&cyf,&cxf);
-  size_t nynx=(size_t)ny*nx; int maxr=(int)(0.9*(ny<nx?ny:nx)*0.5);
+  size_t nynx=(size_t)ny*nx; int maxr=(int)(0.9*(ny<nx?ny:nx)*0.5); if(maxr<12) return fallback;
   int *hist=calloc(maxr+2,sizeof(int)); long total=0;
-  // measure on RAW intensity (v>=80), NOT the morphologically-cleaned mask: cleaning
-  // closes the thin inter-sheet gaps and merges wraps, inflating the apparent pitch.
-  for(int a=0;a<360;a++){ double ca=cos(a*M_PI/180),sa=sin(a*M_PI/180);
-    int prev=0,laststart=-1;
-    for(int r=2;r<maxr;r++){ int yy=(int)(cyf+r*sa),xx=(int)(cxf+r*ca);
-      if(yy<0||yy>=ny||xx<0||xx>=nx)break; int on=v[(size_t)z*nynx+(size_t)yy*nx+xx]>=80;
-      if(on&&!prev){ if(laststart>0){int g=r-laststart; if(g>=1&&g<=maxr)hist[g]++,total++;} laststart=r; } prev=on; } }
+  double *p=malloc(maxr*sizeof(double)),*sm=malloc(maxr*sizeof(double));
+  for(int a=0;a<360;a++){ double ca=cos(a*M_PI/180),sa=sin(a*M_PI/180); int rmax=0;
+    for(int r=0;r<maxr;r++){ int yy=(int)(cyf+r*sa),xx=(int)(cxf+r*ca);
+      if(yy<0||yy>=ny||xx<0||xx>=nx)break; p[r]=v[(size_t)z*nynx+(size_t)yy*nx+xx]; rmax=r; }
+    if(rmax<12) continue;
+    for(int r=0;r<=rmax;r++){ double s=0;int c=0; for(int d=-2;d<=2;d++){int rr=r+d; if(rr>=0&&rr<=rmax){s+=p[rr];c++;}} sm[r]=s/c; }
+    int last=-1;
+    for(int r=3;r<=rmax-3;r++){
+      if(sm[r]>sm[r-1]&&sm[r]>=sm[r+1]&&sm[r]>sm[r-3]+2&&sm[r]>sm[r+3]+2){   // prominent peak
+        if(last>0){ int g=r-last; if(g>=2&&g<maxr){hist[g]++;total++;} } last=r; } }
+  }
+  free(p);free(sm);
   if(total<50){ free(hist); return fallback; }
-  long acc=0; int med=1; for(int g=1;g<=maxr;g++){ acc+=hist[g]; if(acc*2>=total){med=g;break;} }
-  free(hist); return med>0?med:fallback;
+  long acc=0; int med=(int)fallback; for(int g=2;g<maxr;g++){ acc+=hist[g]; if(acc*2>=total){med=g;break;} }
+  free(hist); return med>=2?med:fallback;
 }
 
 static f32 trilin(const f32*w,int nz,int ny,int nx,double z,double y,double x){
@@ -71,8 +78,8 @@ int main(int argc,char**argv){
   u8 *cv=mca_read(arc,clod,0,0,0,cz,cy,cx); if(!cv){fprintf(stderr,"read fail\n");return 1;}
   size_t cn=(size_t)cz*cy*cx; u8 *cm=malloc(cn);
   #pragma omp parallel for schedule(static)
-  for(size_t i=0;i<cn;i++) cm[i]=cv[i]>=80;
-  majority_filter(cm,cm,cz,cy,cx,1); remove_small_components(cm,cz,cy,cx,TOPO_CONN26,50);
+  for(size_t i=0;i<cn;i++) cm[i]=cv[i]!=0;   // .mca masks air as 0: material = nonzero.
+  // No CC/majority cleaning at LOD5: at 32x downsampling any nonzero voxel is real papyrus.
 
   // auto-estimate the scroll axis (no annotation) instead of assuming volume center
   umbilicus umb;
@@ -116,7 +123,7 @@ int main(int argc,char**argv){
     // parallelized (outermost, non-collapsed) loop or this invariant breaks.
     #pragma omp parallel for schedule(static)
     for(int z=0;z<zh;z++)for(int y=0;y<th;y++)for(int x=0;x<tw;x++){
-      size_t i=((size_t)z*th+y)*tw+x; if(img[i]<80) continue;
+      size_t i=((size_t)z*th+y)*tw+x; if(img[i]==0) continue;   // 0 = archive-masked air
       f32 w=trilin(cw,cz,cy,cx,(zc0+z)*inv_s,(yc0+ty+y)*inv_s,(xc0+tx+x)*inv_s);
       int u=(int)((w-wmin)*ppw); if(u<0||u>=W) continue;
       size_t p=(size_t)z*W+u;

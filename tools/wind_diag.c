@@ -25,15 +25,23 @@
  * intensity) along rays from the umbilicus. = dr_per_winding (one sheet per wrap). */
 static double measure_pitch(const u8*v,int nz,int ny,int nx,const umbilicus*umb,double fb){
   int z=nz/2; f32 cyf,cxf; umbilicus_center(umb,(f32)z,&cyf,&cxf);
-  size_t nynx=(size_t)ny*nx; int maxr=(int)(0.9*(ny<nx?ny:nx)*0.5);
+  size_t nynx=(size_t)ny*nx; int maxr=(int)(0.9*(ny<nx?ny:nx)*0.5); if(maxr<12) return fb;
   int *hist=calloc(maxr+2,sizeof(int)); long total=0;
-  for(int a=0;a<360;a++){ double ca=cos(a*M_PI/180),sa=sin(a*M_PI/180); int prev=0,laststart=-1;
-    for(int r=2;r<maxr;r++){ int yy=(int)(cyf+r*sa),xx=(int)(cxf+r*ca);
-      if(yy<0||yy>=ny||xx<0||xx>=nx)break; int on=v[(size_t)z*nynx+(size_t)yy*nx+xx]>=80;
-      if(on&&!prev){ if(laststart>0){int g=r-laststart; if(g>=1&&g<=maxr)hist[g]++,total++;} laststart=r; } prev=on; } }
+  double *p=malloc(maxr*sizeof(double)),*sm=malloc(maxr*sizeof(double));
+  for(int a=0;a<360;a++){ double ca=cos(a*M_PI/180),sa=sin(a*M_PI/180); int rmax=0;
+    for(int r=0;r<maxr;r++){ int yy=(int)(cyf+r*sa),xx=(int)(cxf+r*ca);
+      if(yy<0||yy>=ny||xx<0||xx>=nx)break; p[r]=v[(size_t)z*nynx+(size_t)yy*nx+xx]; rmax=r; }
+    if(rmax<12) continue;
+    for(int r=0;r<=rmax;r++){ double s=0;int c=0; for(int d=-2;d<=2;d++){int rr=r+d; if(rr>=0&&rr<=rmax){s+=p[rr];c++;}} sm[r]=s/c; }
+    int last=-1;
+    for(int r=3;r<=rmax-3;r++){
+      if(sm[r]>sm[r-1]&&sm[r]>=sm[r+1]&&sm[r]>sm[r-3]+2&&sm[r]>sm[r+3]+2){   // prominent peak
+        if(last>0){ int g=r-last; if(g>=2&&g<maxr){hist[g]++;total++;} } last=r; } }
+  }
+  free(p);free(sm);
   if(total<50){ free(hist); return fb; }
-  long acc=0; int med=1; for(int g=1;g<=maxr;g++){ acc+=hist[g]; if(acc*2>=total){med=g;break;} }
-  free(hist); return med>0?med:fb;
+  long acc=0; int med=(int)fb; for(int g=2;g<maxr;g++){ acc+=hist[g]; if(acc*2>=total){med=g;break;} }
+  free(hist); return med>=2?med:fb;
 }
 
 /* Build the Poisson forcing div(g), g = (sheetness * oriented sheet-normal)/pitch,
@@ -86,8 +94,8 @@ int main(int argc,char**argv){
   u8*cv=mca_read(arc,clod,0,0,0,cz,cy,cx); if(!cv){fprintf(stderr,"read fail\n");return 1;}
   size_t cn=(size_t)cz*cy*cx; u8*cm=malloc(cn);
   #pragma omp parallel for schedule(static)
-  for(size_t i=0;i<cn;i++) cm[i]=cv[i]>=80;
-  majority_filter(cm,cm,cz,cy,cx,1); remove_small_components(cm,cz,cy,cx,TOPO_CONN26,50);
+  for(size_t i=0;i<cn;i++) cm[i]=cv[i]!=0;
+  
   umbilicus umb; if(umbilicus_estimate(cm,cz,cy,cx,9,&umb)){fprintf(stderr,"umb fail\n");return 1;}
   f32*cw=malloc(cn*sizeof(f32)); wfield_params wp=winding_default_params();
   wp.dr_per_winding=(f32)(pitch>0?pitch:measure_pitch(cv,cz,cy,cx,&umb,96.0/s));
