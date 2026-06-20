@@ -110,5 +110,64 @@ int main(int argc,char**argv){
   char fn[600]; snprintf(fn,sizeof fn,"%s_wind.ppm",base);
   FILE*f=fopen(fn,"wb"); if(f){ fprintf(f,"P6\n%d %d\n255\n",d,d); fwrite(rgb,1,nn*3,f); fclose(f); }
   printf("wrote %s (delamination segments coloured by spiral-fit winding)\n",fn);
+
+  // (5) VALLEY-EXTENSION: split partially-delaminated touches. Each delamination air
+  // channel runs along a sheet boundary; extend it from its endpoints by FOLLOWING the
+  // intensity valley (the faint inter-sheet minimum) until it bridges to another void.
+  // Only commit cuts that reach another void (validated bridges, not arbitrary).
+  f32 *vs=malloc(nn*sizeof(f32));                 // lightly smoothed intensity (air=0)
+  for(size_t p=0;p<nn;p++) vs[p]=v[p];
+  for(int it=0;it<2;it++){ f32*t=malloc(nn*sizeof(f32));
+    for(int y=0;y<d;y++)for(int x=0;x<d;x++){ size_t p=(size_t)y*d+x; double s=vs[p];int c=1;
+      if(x>0){s+=vs[p-1];c++;}if(x<d-1){s+=vs[p+1];c++;}if(y>0){s+=vs[p-d];c++;}if(y<d-1){s+=vs[p+d];c++;}
+      t[p]=(f32)(s/c);} memcpy(vs,t,nn*sizeof(f32)); free(t);}
+  for(size_t p=0;p<nn;p++) if(v[p]==0) vs[p]=0;
+  u8*air=malloc(nn); for(size_t p=0;p<nn;p++) air[p]=v[p]==0;
+  u32*al=calloc(nn,sizeof(u32)); u32 nch=cc_label(air,1,d,d,TOPO_CONN6,al);
+  // per-channel moments for PCA
+  size_t*ca=calloc((size_t)nch+1,sizeof(size_t)); double*my=calloc((size_t)nch+1,sizeof(double)),*mx=calloc((size_t)nch+1,sizeof(double));
+  double*syy=calloc((size_t)nch+1,sizeof(double)),*sxx=calloc((size_t)nch+1,sizeof(double)),*sxy=calloc((size_t)nch+1,sizeof(double));
+  for(int y=0;y<d;y++)for(int x=0;x<d;x++){ u32 L=al[(size_t)y*d+x]; if(!L)continue; ca[L]++; my[L]+=y; mx[L]+=x; syy[L]+=(double)y*y; sxx[L]+=(double)x*x; sxy[L]+=(double)x*y; }
+  // axis (major eigenvector) + aspect per channel
+  double*axy=calloc((size_t)nch+1,sizeof(double)),*axx=calloc((size_t)nch+1,sizeof(double)); char*good=calloc((size_t)nch+1,1);
+  for(u32 L=1;L<=nch;L++){ if(ca[L]<25||ca[L]>8000)continue; double N=ca[L];
+    double cyy=syy[L]/N-(my[L]/N)*(my[L]/N), cxx=sxx[L]/N-(mx[L]/N)*(mx[L]/N), cxy=sxy[L]/N-(mx[L]/N)*(my[L]/N);
+    double tr=cyy+cxx, det=cyy*cxx-cxy*cxy, disc=sqrt(fmax(0,tr*tr/4-det));
+    double l1=tr/2+disc, l0=tr/2-disc; if(l1<1e-6)continue; if(sqrt(l1/fmax(l0,1e-6))<2.5)continue;
+    // eigenvector for l1: (cxy, l1-cyy) normalized (in (x,y))
+    double ex=cxy, ey=l1-cyy, n2=hypot(ex,ey); if(n2<1e-9){ex=1;ey=0;n2=1;} axx[L]=ex/n2; axy[L]=ey/n2; good[L]=1; }
+  // endpoints = extreme projections along the axis
+  double*pmin=malloc((size_t)(nch+1)*sizeof(double)),*pmax=malloc((size_t)(nch+1)*sizeof(double));
+  int*emin=malloc((size_t)(nch+1)*sizeof(int)),*emax=malloc((size_t)(nch+1)*sizeof(int));
+  for(u32 L=0;L<=nch;L++){pmin[L]=1e30;pmax[L]=-1e30;emin[L]=emax[L]=-1;}
+  for(int y=0;y<d;y++)for(int x=0;x<d;x++){ u32 L=al[(size_t)y*d+x]; if(!L||!good[L])continue;
+    double pr=x*axx[L]+y*axy[L]; if(pr<pmin[L]){pmin[L]=pr;emin[L]=(int)((size_t)y*d+x);} if(pr>pmax[L]){pmax[L]=pr;emax[L]=(int)((size_t)y*d+x);} }
+  u8*cut=calloc(nn,1); long ncut=0,nbridge=0;
+  for(u32 L=1;L<=nch;L++){ if(!good[L])continue;
+    for(int s=0;s<2;s++){ int ep= s? emax[L]:emin[L]; if(ep<0)continue; double sg= s?1:-1;
+      double yy=ep/d, xx=ep%d, dy=axy[L]*sg, dx=axx[L]*sg; int tmp[120]; int npath=0; int bridged=0;
+      for(int t=0;t<80;t++){ double bv=1e30,by=0,bx=0,bdy=0,bdx=0; int found=0;
+        for(int ai=0;ai<9;ai++){ double ang=-0.6+1.2*ai/8.0,ca2=cos(ang),sa2=sin(ang);
+          double ndy=dy*ca2-dx*sa2, ndx=dy*sa2+dx*ca2, ty=yy+ndy*1.5, tx=xx+ndx*1.5;
+          int iy=(int)lround(ty),ix=(int)lround(tx); if(iy<0||iy>=d||ix<0||ix>=d)continue;
+          size_t q=(size_t)iy*d+ix; if(v[q]==0){ bridged=1; goto done; }
+          double val=vs[q]+fabs(ang)*8; if(val<bv){bv=val;by=ty;bx=tx;bdy=ndy;bdx=ndx;found=1;} }
+        if(!found)break; yy=by;xx=bx; double m=hypot(bdy,bdx); dy=bdy/m;dx=bdx/m;
+        int iy=(int)lround(yy),ix=(int)lround(xx); if(npath<120)tmp[npath++]=(int)((size_t)iy*d+ix); }
+      done:; if(bridged){ for(int i=0;i<npath;i++){ if(!cut[tmp[i]]){cut[tmp[i]]=1;ncut++;} } nbridge++; } } }
+  printf("valley-extension: %ld bridging cuts (%ld cut px)\n",nbridge,ncut);
+  // segmentation = material minus the cuts (dilated 1)
+  u8*sep=malloc(nn); for(int y=0;y<d;y++)for(int x=0;x<d;x++){ size_t p=(size_t)y*d+x;
+    int c=cut[p]; if(!c){ if(x>0&&cut[p-1])c=1; else if(x<d-1&&cut[p+1])c=1; else if(y>0&&cut[p-d])c=1; else if(y<d-1&&cut[p+d])c=1; }
+    sep[p]= (v[p]!=0 && !c); }
+  u32*pl=calloc(nn,sizeof(u32)); u32 npc=cc_label(sep,1,d,d,TOPO_CONN26,pl);
+  size_t*pa=calloc((size_t)npc+1,sizeof(size_t)); for(size_t p=0;p<nn;p++) pa[pl[p]]++;
+  long nbig=0; for(u32 L=1;L<=npc;L++) if(pa[L]>=150)nbig++;
+  printf("sheet pieces after valley-cut: %ld (>=150px)\n",nbig);
+  for(size_t p=0;p<nn;p++){ rgb[3*p]=rgb[3*p+1]=rgb[3*p+2]=0; u32 L=pl[p]; if(L&&pa[L]>=150){
+    rgb[3*p]=(u8)(40+(L*97)%216); rgb[3*p+1]=(u8)(40+(L*53)%216); rgb[3*p+2]=(u8)(40+(L*191)%216);} }
+  snprintf(fn,sizeof fn,"%s_seg.ppm",base);
+  f=fopen(fn,"wb"); if(f){ fprintf(f,"P6\n%d %d\n255\n",d,d); fwrite(rgb,1,nn*3,f); fclose(f); }
+  printf("wrote %s (sheet pieces after delamination + valley-extension cuts)\n",fn);
   return 0;
 }
