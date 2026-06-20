@@ -21,6 +21,7 @@
 #include "io/tiff_vol.h"
 #include "eval/topo.h"
 #include "annotate/umbilicus.h"
+#include "unwrap/winding_field.h"
 
 int main(int argc,char**argv){
   if(argc<8){fprintf(stderr,"usage: %s ARCHIVE OUTBASE lod z0 y0 x0 d [nz=1] [minpocket=8]\n",argv[0]);return 2;}
@@ -169,5 +170,25 @@ int main(int argc,char**argv){
   f=fopen(fn,"wb"); if(f){ fprintf(f,"P6\n%d %d\n255\n",d,d); fwrite(rgb,1,nynx*3,f); fclose(f); }
   float wmx=0; for(size_t p=0;p<nynx;p++) if(wind[p]>wmx)wmx=wind[p];
   printf("winding from traced sheets: %.0f wraps across patch -> %s\n",wmx,fn);
+
+  // (4) FIELD-SOLVE winding at native LOD0: radial init + relaxation within the v!=0
+  // mask. At LOD0 the air gaps are real, so the diffusion is stopped at gaps and each
+  // gap-separated sheet gets a clean winding (the LOD5 problem was blurred gaps).
+  u8*mask=malloc(nynx); for(size_t p=0;p<nynx;p++) mask[p]=v[p]!=0;
+  umbilicus pu; pu.n=2; pu.z=malloc(8);pu.y=malloc(8);pu.x=malloc(8);
+  pu.z[0]=0;pu.z[1]=0; pu.y[0]=pu.y[1]=(f32)cyf; pu.x[0]=pu.x[1]=(f32)cxf;
+  f32*wf=malloc(nynx*sizeof(f32));
+  wfield_params wp=winding_default_params(); wp.dr_per_winding=128.0f*(f32)(1.0/ (double)(1<<lod)); // ~one wrap at this lod
+  if(wp.dr_per_winding<2)wp.dr_per_winding=2; wp.iters=40;
+  winding_field_solve(mask,1,d,d,&pu,&wp,NULL,NULL,wf);
+  for(size_t p=0;p<nynx;p++){ size_t i=off+p; int g=v[i]/4; u8 R=g,G=g,B=g;
+    if(v[i]){ double f6=fmod(wf[p]<0?0:wf[p],6.0); if(f6<0)f6+=6; int hi=(int)f6; double fr=f6-hi;
+      int vv=255,pp=30,qq=(int)(255*(1-fr)),tt=(int)(255*fr);
+      switch(hi){case 0:R=vv;G=tt;B=pp;break;case 1:R=qq;G=vv;B=pp;break;case 2:R=pp;G=vv;B=tt;break;
+        case 3:R=pp;G=qq;B=vv;break;case 4:R=tt;G=pp;B=vv;break;default:R=vv;G=pp;B=qq;} }
+    rgb[3*p+0]=R;rgb[3*p+1]=G;rgb[3*p+2]=B; }
+  snprintf(fn,sizeof fn,"%s_wind2.ppm",base);
+  f=fopen(fn,"wb"); if(f){ fprintf(f,"P6\n%d %d\n255\n",d,d); fwrite(rgb,1,nynx*3,f); fclose(f); }
+  printf("field-solve winding (LOD%d, pitch %.1f) -> %s\n",lod,wp.dr_per_winding,fn);
   return 0;
 }
