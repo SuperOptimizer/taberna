@@ -605,6 +605,20 @@ int main(int argc,char**argv){
         if(iy<0||iy>=d||ix<0||ix>=d||oy<0||oy>=d||ox<0||ox>=d)continue;
         float c=vs[p],in=vs[(size_t)iy*d+ix],ou=vs[(size_t)oy*d+ox];
         if(c<=in && c<=ou) bar[p]=1; }                  // radial local-min = inter-sheet boundary
+      // BARRIER CLOSE: seal azimuthal GAPS in the inter-sheet walls (winding leaks through a
+      // gap and contaminates an arc -> the coherent tangential backward-switch streaks seen
+      // near barriers). Morphological close (dilate r then erode r) over MATERIAL only, so
+      // it bridges gaps without thickening into the sheets. argv[14] radius (0 = off).
+      int barclose=argc>14?atoi(argv[14]):(pitch>=16.0?1:0);  // fine res: seal salty barrier gaps (cuts switches);
+                                                              // coarse res: barriers already thick, closing over-merges -> off
+      if(barclose>0){ u8*tb=malloc(nn);
+        for(int it2=0;it2<barclose;it2++){ memcpy(tb,bar,nn);
+          for(int y=0;y<d;y++)for(int x=0;x<d;x++){ size_t q=(size_t)y*d+x; if(tb[q]||v[q]<athr)continue;
+            if((x>0&&tb[q-1])||(x<d-1&&tb[q+1])||(y>0&&tb[q-d])||(y<d-1&&tb[q+d])) bar[q]=1; } }
+        for(int it2=0;it2<barclose;it2++){ memcpy(tb,bar,nn);
+          for(int y=0;y<d;y++)for(int x=0;x<d;x++){ size_t q=(size_t)y*d+x; if(!tb[q])continue;
+            if((x>0&&!tb[q-1])||(x<d-1&&!tb[q+1])||(y>0&&!tb[q-d])||(y<d-1&&!tb[q+d])) bar[q]=0; } }
+        free(tb); }
       long nbar=0; for(size_t p=0;p<nn;p++) nbar+=bar[p];
       // ANISOTROPIC weighted diffusion: edge weight is HIGH along bright sheet centers,
       // ~0 across valley barriers -> winding follows the sheet, never jumps to the neighbour.
@@ -637,15 +651,23 @@ int main(int argc,char**argv){
       // with weight LAM, while still participating in the tangential smoothing. The field
       // tracks the nodes globally but averages out their azimuthal jitter -> continuous wraps.
       const double omega=1.7, LAM=(argc>12?atof(argv[12]):0.1);  // soft-anchor strength; 0.1 = switch-rate parity with hard +1 baseline at full geom
+      // OUTWARD-DRIFT (screened Poisson): winding MUST climb outward at ~1/pitch across the
+      // wraps (it's a spiral). A pure harmonic (Laplace) solve has no slope -> wherever
+      // anchors locally disagree the field sits flat and wiggles, producing backward sheet
+      // switches. Each neighbour contributes its winding MINUS the expected step along the
+      // across-wrap direction, so the field is pushed to climb at the right rate. DR scales
+      // the drift (argv[13]; 0 = old harmonic).
+      const double DR=(argc>13?atof(argv[13]):0.0)/fmax(pitch,1e-6);  // outward drift: 0 (field already has correct slope; forcing it hurt)
       for(int it=0;it<400;it++) for(int color=0;color<2;color++){
         #pragma omp parallel for schedule(static)
         for(int y=0;y<d;y++)for(int x=0;x<d;x++){ if(((x+y)&1)!=color)continue; size_t p=(size_t)y*d+x;
           if(v[p]<athr || bar[p]) continue;               // air + valley walls fixed; anchors now SOFT
           double nx_=nrx[p],ny_=nry[p];
           double ax=0.12+0.88*(1.0-nx_*nx_), ay=0.12+0.88*(1.0-ny_*ny_);  // tangent-biased, small isotropic floor
+          WDIRV(p,y,x); double gx=DR*ux, gy=DR*uy;          // expected d(wind) per +1 step in x / y (outward)
           double s=0,wsum=0,w;
-          if(x>0)  {w=EW(p-1)*ax;s+=w*wd[p-1];wsum+=w;} if(x<d-1){w=EW(p+1)*ax;s+=w*wd[p+1];wsum+=w;}
-          if(y>0)  {w=EW(p-d)*ay;s+=w*wd[p-d];wsum+=w;} if(y<d-1){w=EW(p+d)*ay;s+=w*wd[p+d];wsum+=w;}
+          if(x>0)  {w=EW(p-1)*ax;s+=w*(wd[p-1]+gx);wsum+=w;} if(x<d-1){w=EW(p+1)*ax;s+=w*(wd[p+1]-gx);wsum+=w;}
+          if(y>0)  {w=EW(p-d)*ay;s+=w*(wd[p-d]+gy);wsum+=w;} if(y<d-1){w=EW(p+d)*ay;s+=w*(wd[p+d]-gy);wsum+=w;}
           if(anc[p]){ double wa=LAM*wsum+1e-6; s+=wa*ancw[p]; wsum+=wa; }   // soft data term toward node winding
           if(wsum>1e-9){ double avg=s/wsum; wd[p]=(float)(wd[p]+omega*(avg-wd[p])); } }
       }
@@ -685,24 +707,43 @@ int main(int argc,char**argv){
         printf("METRIC geom-consistency  wraps=%d  pitch=%.1f  radial-span=%.0f  implied-wraps=%.1f  rel.err=%.2f\n",
                nwrap,pitch,span,geomw,fabs(nwrap-geomw)/fmax(geomw,1));
 
-        // (b) RADIAL MONOTONICITY (switch rate) + LOCAL PITCH UNIFORMITY via outward rays.
-        // Along an outward ray the winding should rise (or fall) monotonically by ~1/pitch
-        // per px. Backward steps and >1-wrap jumps are sheet switches. Integer-crossing
-        // spacings give the local pitch -> CoV = how uniform the wrap spacing is.
-        long steps=0,backw=0,jumps=0; double psum=0,psum2=0; long pn=0; int Rr=(int)Rout+4;
+        // (b) SWITCH RATE -- VOXEL-FAIR (each material voxel counted once; radial rays
+        // over-sample the core ~360x and inflate it). For each voxel, its outward neighbour
+        // along the across-wrap direction should have HIGHER winding; a DROP is a backward
+        // sheet switch. Split inner-third vs outer to localise; flag at-barrier (touch).
+        long sw=0,jumps=0,matc=0, sw_in=0,mat_in=0, sw_bar=0; int Rr=(int)Rout+4; (void)Rr;
+        double rcore=Rin+(Rout-Rin)*0.34;
+        u8 *swmap=calloc(nn,1);                  // heatmap: 1=backward switch, 2=wrap jump
+        for(int y=0;y<d;y++)for(int x=0;x<d;x++){ size_t p=(size_t)y*d+x; if(v[p]<athr||bar[p])continue;
+          WDIRV(p,y,x); if(r<2)continue;
+          int oy=(int)lround(y+uy*2),ox=(int)lround(x+ux*2); if(oy<0||oy>=d||ox<0||ox>=d)continue;
+          size_t o=(size_t)oy*d+ox; if(v[o]<athr||bar[o])continue;
+          matc++; int inr=(r<rcore); if(inr)mat_in++;
+          double diff=(double)wd[o]-(double)wd[p];
+          if(diff<-0.3){ sw++; if(inr)sw_in++; swmap[p]=1;
+            int nb=0; for(int dyy=-2;dyy<=2&&!nb;dyy++)for(int dxx=-2;dxx<=2&&!nb;dxx++){ int yz=y+dyy,xz=x+dxx; if(yz>=0&&yz<d&&xz>=0&&xz<d&&bar[(size_t)yz*d+xz])nb=1; }
+            if(nb) sw_bar++; }
+          else if(diff>1.5){ jumps++; swmap[p]=2; } }
+        // LOCAL PITCH UNIFORMITY via outward rays (integer-crossing spacings -> CoV).
+        double psum=0,psum2=0; long pn=0;
         for(int a=0;a<360;a++){ double th=a*M_PI/180.0, uy=sin(th),ux=cos(th);
-          double w0=0,w1=0; int n0c=0;
-          for(int k=2;k<Rr;k++){ int yy=(int)lround(cyf+uy*k),xx=(int)lround(cxf+ux*k); if(yy<0||yy>=d||xx<0||xx>=d)break;
-            size_t q=(size_t)yy*d+xx; if(v[q]<athr||bar[q])continue; if(!n0c)w0=wd[q]; w1=wd[q]; n0c++; }
-          if(n0c<5) continue; double sgn=(w1>=w0)?1.0:-1.0;
           double pw=0,pr=-1; int havep=0;
           for(int k=2;k<Rr;k++){ int yy=(int)lround(cyf+uy*k),xx=(int)lround(cxf+ux*k); if(yy<0||yy>=d||xx<0||xx>=d)break;
             size_t q=(size_t)yy*d+xx; if(v[q]<athr||bar[q])continue; double w=wd[q];
-            if(havep){ double diff=(w-pw)*sgn; steps++; if(diff<-0.3)backw++; if(diff>1.5)jumps++;
-              if((int)floor(pw)!=(int)floor(w) && fabs(w-pw)<1.5){ if(pr>=0){ double sp2=k-pr; if(sp2>1&&sp2<5*pitch){psum+=sp2;psum2+=sp2*sp2;pn++;} } pr=k; } }
+            if(havep && (int)floor(pw)!=(int)floor(w) && fabs(w-pw)<1.5){ if(pr>=0){ double sp2=k-pr; if(sp2>1&&sp2<5*pitch){psum+=sp2;psum2+=sp2*sp2;pn++;} } pr=k; }
             pw=w; havep=1; } }
-        printf("METRIC switch-rate       %.1f backward + %.1f wrap-jump  per 1000 radial steps  (%ld+%ld over %ld)\n",
-               1000.0*backw/fmax(steps,1),1000.0*jumps/fmax(steps,1),backw,jumps,steps);
+        printf("METRIC switch-rate       %.1f backward + %.1f wrap-jump  per 1000 material voxels  (%ld+%ld over %ld)\n",
+               1000.0*sw/fmax(matc,1),1000.0*jumps/fmax(matc,1),sw,jumps,matc);
+        printf("METRIC switch-locale     inner-third %.1f vs outer %.1f backward/1000  |  %.0f%% of switches at a barrier (touch)\n",
+               1000.0*sw_in/fmax(mat_in,1), 1000.0*(sw-sw_in)/fmax(matc-mat_in,1), 100.0*sw_bar/fmax(sw,1));
+        { u8 *hm=malloc(nn*3); for(size_t p=0;p<nn;p++){ int g=v[p]/5; hm[3*p]=hm[3*p+1]=hm[3*p+2]=(u8)g;
+            if(bar[p]){ hm[3*p]=0;hm[3*p+1]=0;hm[3*p+2]=120; } }                       // barriers = dim blue
+          for(size_t p=0;p<nn;p++){ if(swmap[p]==1){ hm[3*p]=255;hm[3*p+1]=0;hm[3*p+2]=0; }   // backward = red
+              else if(swmap[p]==2){ hm[3*p]=255;hm[3*p+1]=180;hm[3*p+2]=0; } }               // jump = orange
+          char hf[600]; snprintf(hf,sizeof hf,"%s_switch.ppm",base);
+          FILE*hff=fopen(hf,"wb"); if(hff){ fprintf(hff,"P6\n%d %d\n255\n",d,d); fwrite(hm,1,nn*3,hff); fclose(hff); }
+          free(hm); printf("wrote %s (switch heatmap: red=backward orange=jump, blue=barrier)\n",hf); }
+        free(swmap);
         if(pn>3){ double pm=psum/pn, pv=psum2/pn-pm*pm; printf("METRIC pitch-uniformity  local-pitch mean=%.1f  CoV=%.2f  (n=%ld spacings)\n",pm,sqrt(fmax(0,pv))/fmax(pm,1e-6),pn); }
 
         // (c) PER-WRAP INTEGRITY: for each integer band, angular coverage (fraction of 360
