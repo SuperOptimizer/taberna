@@ -662,15 +662,18 @@ int main(int argc,char**argv){
   // azimuth, one revolution per wrap-width), vertical = z, pixel = mean source intensity of the
   // material at that (winding,z). A clean layered papyrus image validates the whole chain.
   { const int SAMP=120; int UW=(int)((wmax-wmin)*SAMP)+1; if(UW<1)UW=1; if(UW>20000)UW=20000;
-    double *acc=calloc((size_t)dz*UW,sizeof(double)); long *cnt=calloc((size_t)dz*UW,sizeof(long));
+    // MAX-INTENSITY composite (VC3D Compositing "max"): each (winding,z) cell holds few voxels at
+    // native res; the MEAN dilutes the bright sheet centre with delamination air -> speckle. Taking
+    // the brightest voxel in the cell picks the papyrus surface and rejects the air. Cleaner read.
+    u8 *acc=calloc((size_t)dz*UW,1);
     for(int z=0;z<dz;z++)for(int y=0;y<dy;y++)for(int x=0;x<dx;x++){ size_t p=IDX(z,y,x); if(v[p]<athr||bar[p])continue;
       int u=(int)((wd[p]-wmin)/(wmax-wmin>1e-9?wmax-wmin:1)*(UW-1)); if(u<0||u>=UW)continue;
-      acc[(size_t)z*UW+u]+=v[p]; cnt[(size_t)z*UW+u]++; }
-    u8*img=malloc((size_t)dz*UW); for(size_t i=0;i<(size_t)dz*UW;i++) img[i]=cnt[i]?(u8)(acc[i]/cnt[i]):0;
+      size_t o=(size_t)z*UW+u; if(v[p]>acc[o]) acc[o]=v[p]; }
+    u8*img=acc;
     char fn[700]; snprintf(fn,sizeof fn,"%s_unroll.pgm",base); FILE*f=fopen(fn,"wb");
     if(f){ fprintf(f,"P5\n%d %d\n255\n",UW,dz); fwrite(img,1,(size_t)dz*UW,f); fclose(f);
       fprintf(stderr,"wrote %s_unroll.pgm (unrolled scroll %dx%d, %d cols/wrap; horiz=winding, vert=z)\n",base,UW,dz,SAMP); }
-    free(acc);free(cnt);free(img); }
+    free(acc); }
   // ARC-LENGTH UNROLL (adapted from spiral-fitting's area-correct flatten): mapping horizontal
   // linearly to winding w stretches every wrap to the same width, so inner wraps (small radius,
   // small circumference) are horizontally stretched ~N x vs outer wraps -> text distorted. The
@@ -682,15 +685,14 @@ int main(int argc,char**argv){
     // resolution: keep the OUTER (densest) wrap at ~SAMP cols; dS/dw at wmax = rmin+pitch*wmax
     const int SAMP=120; double dSmax=rmin+pitch*wmax; int UW=(int)(Sspan/(dSmax>1e-6?dSmax:1)*SAMP)+1;
     if(UW<1)UW=1; if(UW>30000)UW=30000;
-    double *acc=calloc((size_t)dz*UW,sizeof(double)); long *cnt=calloc((size_t)dz*UW,sizeof(long));
+    u8 *acc=calloc((size_t)dz*UW,1);   // MAX-intensity composite (see linear unroll above)
     for(int z=0;z<dz;z++)for(int y=0;y<dy;y++)for(int x=0;x<dx;x++){ size_t p=IDX(z,y,x); if(v[p]<athr||bar[p])continue;
       double w=wd[p],Sw=rmin*w+0.5*pitch*w*w; int u=(int)((Sw-Sw0)/Sspan*(UW-1)); if(u<0||u>=UW)continue;
-      acc[(size_t)z*UW+u]+=v[p]; cnt[(size_t)z*UW+u]++; }
-    u8*img=malloc((size_t)dz*UW); for(size_t i=0;i<(size_t)dz*UW;i++) img[i]=cnt[i]?(u8)(acc[i]/cnt[i]):0;
+      size_t o=(size_t)z*UW+u; if(v[p]>acc[o]) acc[o]=v[p]; }
     char fn[700]; snprintf(fn,sizeof fn,"%s_unroll_arc.pgm",base); FILE*f=fopen(fn,"wb");
-    if(f){ fprintf(f,"P5\n%d %d\n255\n",UW,dz); fwrite(img,1,(size_t)dz*UW,f); fclose(f);
+    if(f){ fprintf(f,"P5\n%d %d\n255\n",UW,dz); fwrite(acc,1,(size_t)dz*UW,f); fclose(f);
       fprintf(stderr,"wrote %s_unroll_arc.pgm (arc-length unroll %dx%d; horiz=physical arc length, aspect-correct)\n",base,UW,dz); }
-    free(acc);free(cnt);free(img); }
+    free(acc); }
   PHASE("output");
   return 0;
 }
