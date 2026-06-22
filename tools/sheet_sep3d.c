@@ -92,6 +92,31 @@ static int count_valleys(const f32 *vsz, int dy, int dx, double y, double x, dou
   return nv;
 }
 
+// RANSAC/IRLS umbilicus-from-normals (adapted from VC3D normalgridtools::align_and_extract_umbilicus).
+// Sheet normals point radially, so each material point's gradient defines a LINE that passes
+// through the scroll center. The center is the robust least-squares intersection of those lines:
+// minimise sum_i w_i (c-p_i)^T (I - n n^T) (c-p_i)  ->  (sum w M) c = (sum w M p), a 2x2 solve,
+// IRLS-reweighted (Tukey on point-line distance, weight by gradient magnitude). Works even when
+// the crop is OFF-CENTER (lines still intersect outside the crop), where the coarse-LOD5 estimate
+// extrapolates poorly. Returns the per-line-distance inlier RMS for diagnostics.
+static double refine_center_slice(const f32*vs,const u8*v,int athr,int dy,int dx,
+                                  double*cy_io,double*cx_io,double pitch){
+  double gthr=0.05*athr; if(gthr<2)gthr=2; double scale=0.5*pitch; if(scale<4)scale=4;
+  double cyv=*cy_io,cxv=*cx_io,rms=0;
+  for(int rep=0;rep<5;rep++){
+    double A00=0,A01=0,A11=0,b0=0,b1=0,sd=0; long ni=0;
+    for(int y=1;y<dy-1;y++)for(int x=1;x<dx-1;x++){ size_t p=(size_t)y*dx+x; if(v[p]<athr)continue;
+      double gy=0.5*((double)vs[p+dx]-vs[p-dx]),gx=0.5*((double)vs[p+1]-vs[p-1]); double g=sqrt(gy*gy+gx*gx); if(g<gthr)continue;
+      double ny=gy/g,nx=gx/g, M00=1-ny*ny,M01=-ny*nx,M11=1-nx*nx;
+      double dyp=cyv-y,dxp=cxv-x, d2=dyp*(M00*dyp+M01*dxp)+dxp*(M01*dyp+M11*dxp), d=sqrt(d2>0?d2:0);
+      double tw=(d<scale)?(1-(d/scale)*(d/scale))*(1-(d/scale)*(d/scale)):0; if(tw<=0)continue; double w=g*tw;
+      A00+=w*M00;A01+=w*M01;A11+=w*M11; b0+=w*(M00*y+M01*x); b1+=w*(M01*y+M11*x); sd+=tw*d2; ni++; }
+    double det=A00*A11-A01*A01; if(fabs(det)<1e-6||ni<50) break;
+    cyv=(A11*b0-A01*b1)/det; cxv=(A00*b1-A01*b0)/det; rms=sqrt(sd/ni);
+  }
+  *cy_io=cyv; *cx_io=cxv; return rms;
+}
+
 static int cmp_long(const void*a,const void*b){ long x=*(const long*)a,y=*(const long*)b; return (x>y)-(x<y); }
 // aggregate packed (key<<4|step) edge keys -> sparse (a,b,count,step) keeping run>=minc
 static long agg_edges(long*raw,long nraw,int K,int**ao,int**bo,long**wo,long**so,long minc){
@@ -149,6 +174,21 @@ int main(int argc,char**argv){
   int tier=(int)(0.7*pitch+0.5); if(tier<3)tier=3; if(tier>30)tier=30;
   double vprom=0.35*athr; if(vprom<6)vprom=6; double pitchmin=0.20*pitch;
   fprintf(stderr,"pitch=%.1f walk=%d kmin=%d tie=%d vprom=%.1f\n",pitch,walkr,kmin,tier,vprom);
+
+  // refine per-z umbilicus from sheet normals (robust line intersection); keeps coarse estimate
+  // as init/fallback. Sanity-clamp: reject a refined center that bolts >0.6*dim from coarse.
+  int umbref=argc>21?atoi(argv[21]):1;
+  if(umbref){ double *ny0=malloc(dz*sizeof(double)),*nx0=malloc(dz*sizeof(double)); double mr=0; int nref=0;
+    for(int z=0;z<dz;z++){ double cyz=cy[z],cxz=cx[z];
+      double rms=refine_center_slice(vs+(size_t)z*dy*dx,v+(size_t)z*dy*dx,athr,dy,dx,&cyz,&cxz,pitch);
+      double clampr=0.6*((dy<dx)?dy:dx);
+      if(fabs(cyz-cy[z])<clampr && fabs(cxz-cx[z])<clampr && rms>0){ ny0[z]=cyz; nx0[z]=cxz; mr+=rms; nref++; }
+      else { ny0[z]=cy[z]; nx0[z]=cx[z]; } }
+    // smooth refined centers across z (window +/-4) -> robust to per-slice noise
+    for(int z=0;z<dz;z++){ double sy=0,sx=0;int n=0; for(int d=-4;d<=4;d++){int zz=z+d;if(zz<0||zz>=dz)continue;sy+=ny0[zz];sx+=nx0[zz];n++;} cy[z]=sy/n;cx[z]=sx/n; }
+    fprintf(stderr,"umbilicus refined from normals: %d/%d slices, mean line-RMS=%.2f, center z0=(%.0f,%.0f) zmid=(%.0f,%.0f)\n",
+      nref,dz,nref?mr/nref:0,cy[0],cx[0],cy[dz/2],cx[dz/2]);
+    free(ny0);free(nx0); }
 
   // radial unit dir per voxel (in-plane, outward from per-z center)
   // ridge = radial intensity max; recto = material with air outward; bar = radial min
