@@ -13,12 +13,21 @@
  *   3. PER-SLICE 2D cc_label (no z-percolation) -> nodes.
  *   4. radial walk + VALLEY-COUNT winding step (keep walking through same-wrap fragments,
  *      stop at the first valley crossing) -> step-edges; optional same-wrap/z ties.
- *   5. ONE global IRLS least-squares winding solve (anchor innermost=0).
+ *   5. ONE global IRLS least-squares winding solve + a WEAK RADIUS PRIOR. The radial
+ *      step-edges give precise local structure, but the graph is many disconnected
+ *      components (per-slice/per-angle) that float with arbitrary integer offsets and
+ *      cancel when pooled. A weak pull toward winding ~= (radius-r_inner)/pitch fixes each
+ *      component's offset from its (reliable) radius WITHOUT wrap-bridging z/same-wrap ties.
  *   6. dense anisotropic 3D propagation (radial-blocked barriers, z-coupled, soft anchors).
  *
- * usage: sheet_sep3d ARCHIVE OUTBASE lod z0 y0 x0 dz dy dx [minseg=40] [pitch=auto] [LAM=0.6] [WEQ=1] [z-tie=0]
- * STATUS: WIP -- radial winding structure is correct (span ~matches geometry); dense-field
- * switch-rate and reliable z/recto-ridge ties are the open work.
+ * THICK ridges (2D-quality) + per-slice 2D labels + tangential ties (same-wrap, can't bridge
+ * wraps) + radius prior -> the node winding is MONOTONIC in radius and matches the pitch
+ * geometry (span ~= radial-span/pitch). Recto is sparse/flat in compressed cores and flattens
+ * the fit -> RIDGE-ONLY by default (argv[15]=1 to add recto for delaminated outer regions).
+ *
+ * usage: sheet_sep3d ARCHIVE OUTBASE lod z0 y0 x0 dz dy dx [minseg=40] [pitch=auto] [LAM=0.6]
+ *        [WEQ=3] [z-tie=0] [use_recto=0] [LPRI=0.15]
+ * STATUS: node winding structure CORRECT; dense-field switch-rate (~190/1000) is the open work.
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -102,7 +111,7 @@ int main(int argc,char**argv){
   long z0=atol(argv[4]),y0=atol(argv[5]),x0=atol(argv[6]);
   int dz=atoi(argv[7]),dy=atoi(argv[8]),dx=atoi(argv[9]);
   int minseg=argc>10?atoi(argv[10]):40; double pitch_arg=argc>11?atof(argv[11]):0;
-  int use_recto=argc>15?atoi(argv[15]):1;   // recto (delamination rims) is sparse/flat in compressed cores; 0 = ridge-only
+  int use_recto=argc>15?atoi(argv[15]):0;   // recto (delamination rims) is sparse/flat in compressed cores; 0 = ridge-only
   g_tl=tnow();
   mca_handle*arc=mca_open(path); if(!arc){fprintf(stderr,"open fail\n");return 1;}
   int fz,fy,fx,nl; float ql; mca_handle_dims(arc,&fz,&fy,&fx,&ql,&nl);
@@ -149,13 +158,12 @@ int main(int argc,char**argv){
     double ddy=y-cy[z],ddx=x-cx[z],r=sqrt(ddy*ddy+ddx*ddx); if(r<2)continue; double uy=ddy/r,ux=ddx/r;
     int iy=(int)lround(y-uy),ix=(int)lround(x-ux),oy=(int)lround(y+uy),ox=(int)lround(x+ux);
     if(iy<0||iy>=dy||ix<0||ix>=dx||oy<0||oy>=dy||ox<0||ox>=dx)continue;
-    // STRICT radial peak (margin) so ridges are THIN -- thick plateaus 26-connect adjacent
-    // wraps into one giant percolated 3D blob (one node -> flat winding). Check +/-1 and +/-2.
-    int iy2=(int)lround(y-uy*2),ix2=(int)lround(x-ux*2),oy2=(int)lround(y+uy*2),ox2=(int)lround(x+ux*2);
+    // THICK ridge (2D-style): a radial local max. Per-slice labeling means this can't
+    // percolate across z; within a slice the thick crest is TANGENTIALLY CONNECTED into one
+    // big wrap-arc node (not fragments), so the graph is connected -- the whole point of B.
     f32 c=vs[p],in=vs[IDX(z,iy,ix)],ou=vs[IDX(z,oy,ox)];
-    f32 in2=(iy2>=0&&iy2<dy&&ix2>=0&&ix2<dx)?vs[IDX(z,iy2,ix2)]:in, ou2=(oy2>=0&&oy2<dy&&ox2>=0&&ox2<dx)?vs[IDX(z,oy2,ox2)]:ou;
-    if(c>in&&c>ou&&c>=in2&&c>=ou2&&c>=athr) ridge[p]=1;   // strict local max over +/-2 radial
-    if(c<in&&c<ou&&c<=in2&&c<=ou2) bar[p]=1;              // strict local min
+    if(c>=in&&c>=ou&&c>=athr) ridge[p]=1;
+    if(c<=in&&c<=ou) bar[p]=1;                            // radial local min = inter-sheet boundary
     for(int k=1;k<=3;k++){ int ry=(int)lround(y+uy*k),rx=(int)lround(x+ux*k);
       if(ry>=0&&ry<dy&&rx>=0&&rx<dx&&v[IDX(z,ry,rx)]<athr){ recto[p]=1; break; } } }
   if(!use_recto) memset(recto,0,nn);   // ridge-only mode: drop the unreliable recto graph
@@ -254,23 +262,32 @@ int main(int argc,char**argv){
   { long sh[5]={0}; for(long e=0;e<n1;e++){ int s=s1[e]; if(s>4)s=4; sh[s]++; }
     fprintf(stderr,"3D graph: %ld step-edges, %ld ties; step hist [0..4+]: %ld %ld %ld %ld %ld\n",n1,n0,sh[0],sh[1],sh[2],sh[3],sh[4]); }
   PHASE("3D graph");
-  double WEQ_ARG=argc>13?atof(argv[13]):1.0;
+  double WEQ_ARG=argc>13?atof(argv[13]):3.0;
 
-  // ---- ONE global winding solve (IRLS), anchor innermost recto (or ridge) = 0 ----
-  int inner=0; double bestr=1e30;
-  for(int i=0;i<K;i++) if(meanr[i]<bestr){bestr=meanr[i];inner=i;}
-  if(K<1){ for(int i=0;i<RK;i++) if(rmeanr[i]<bestr){bestr=rmeanr[i];inner=K+i;} }
+  // ---- ONE global winding solve (IRLS) with a WEAK RADIUS PRIOR ----
+  // The radial step-edges give precise LOCAL structure but the graph is many disconnected
+  // components (per-slice, per-angular-sector); each floats with an arbitrary integer
+  // offset, and pooling them (no reliable z-tie) cancels the radial gradient. A weak pull
+  // toward winding ~= (radius - r_inner)/pitch fixes each component's offset from its radius
+  // (reliable) WITHOUT the wrap-bridging z/same-wrap ties. Step-edges still dominate locally.
+  double rmin=1e30; for(int i=0;i<K;i++) if(meanr[i]<rmin)rmin=meanr[i]; for(int i=0;i<RK;i++) if(rmeanr[i]<rmin)rmin=rmeanr[i];
+  double *prior=malloc(NT*sizeof(double));
+  for(int i=0;i<K;i++) prior[i]=(meanr[i]-rmin)/pitch;
+  for(int i=0;i<RK;i++) prior[K+i]=(rmeanr[i]-rmin)/pitch;
+  const double LPRI=argc>16?atof(argv[16]):0.15;        // radius-prior strength
   double *wind=calloc(NT,sizeof(double)),*nw=malloc(NT*sizeof(double)),*den=malloc(NT*sizeof(double));
+  for(int i=0;i<NT;i++) wind[i]=prior[i];                // warm-start from the radius prior
   double *rw=malloc((size_t)(n1?n1:1)*sizeof(double)); for(long e=0;e<n1;e++)rw[e]=1.0;
   const double WEQ=WEQ_ARG;
   for(int round=0;round<4;round++){
     for(int it=0;it<800;it++){ memset(nw,0,NT*sizeof(double)); memset(den,0,NT*sizeof(double));
       for(long e=0;e<n1;e++){ int a=a1[e],b=b1[e]; double w=w1[e]*rw[e],s=(double)s1[e]; nw[a]+=w*(wind[b]-s);den[a]+=w; nw[b]+=w*(wind[a]+s);den[b]+=w; }
       for(long e=0;e<n0;e++){ int a=a0[e],b=b0[e]; double w=WEQ*w0[e]; nw[a]+=w*wind[b];den[a]+=w; nw[b]+=w*wind[a];den[b]+=w; }
-      den[inner]+=5;
+      for(int i=0;i<NT;i++){ nw[i]+=LPRI*prior[i]; den[i]+=LPRI; }   // weak radius prior on every node
       for(int i=0;i<NT;i++) if(den[i]>0) wind[i]=0.5*wind[i]+0.5*(nw[i]/den[i]); }
     if(round<3) for(long e=0;e<n1;e++){ double res=wind[b1[e]]-wind[a1[e]]-s1[e]; double z=res/0.4; rw[e]=1.0/(1.0+z*z); }
   }
+  free(prior);
   double wmin=1e30,wmax=-1e30,sres=0; long nin=0;
   for(int i=0;i<NT;i++){ if(wind[i]<wmin)wmin=wind[i]; if(wind[i]>wmax)wmax=wind[i]; }
   for(long e=0;e<n1;e++) if(rw[e]>0.5){ sres+=fabs(wind[b1[e]]-wind[a1[e]]-s1[e]); nin++; }
