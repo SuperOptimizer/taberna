@@ -198,11 +198,12 @@ int main(int argc,char**argv){
   // sizes + mean radius
   size_t *ra=calloc((size_t)nrid+1,sizeof(size_t)),*sa=calloc((size_t)nrec+1,sizeof(size_t));
   double *rr=calloc((size_t)nrid+1,sizeof(double)),*sr=calloc((size_t)nrec+1,sizeof(double));
+  double *rz=calloc((size_t)nrid+1,sizeof(double)),*sz=calloc((size_t)nrec+1,sizeof(double));  // per-node mean z (labels are per-slice)
   double *rmn=malloc(((size_t)nrid+1)*sizeof(double)),*rmx=malloc(((size_t)nrid+1)*sizeof(double));
   for(u32 L=0;L<=nrid;L++){ rmn[L]=1e30; rmx[L]=-1e30; }
   for(int z=0;z<dz;z++)for(int y=0;y<dy;y++)for(int x=0;x<dx;x++){ size_t p=IDX(z,y,x);
     double ddy=y-cy[z],ddx=x-cx[z],r=sqrt(ddy*ddy+ddx*ddx);
-    u32 L=rl[p]; if(L){ra[L]++;rr[L]+=r; if(r<rmn[L])rmn[L]=r; if(r>rmx[L])rmx[L]=r;} u32 M=sl[p]; if(M){sa[M]++;sr[M]+=r;} }
+    u32 L=rl[p]; if(L){ra[L]++;rr[L]+=r;rz[L]+=z; if(r<rmn[L])rmn[L]=r; if(r>rmx[L])rmx[L]=r;} u32 M=sl[p]; if(M){sa[M]++;sr[M]+=r;sz[M]+=z;} }
   // DIAGNOSTIC: ridge nodes whose radial extent >> pitch are MERGED multi-wrap blobs
   { int merged=0,nbig=0; size_t bigp=0; u32 bigL=0; double bigext=0;
     for(u32 L=1;L<=nrid;L++){ if(ra[L]<(size_t)minseg)continue; nbig++; double ext=rmx[L]-rmn[L];
@@ -214,8 +215,9 @@ int main(int argc,char**argv){
   for(u32 L=1;L<=nrec;L++) cid[L]=(sa[L]>=(size_t)minseg)?K++:-1;
   if(K<2&&RK<2){ fprintf(stderr,"too few 3D nodes (recto=%d ridge=%d)\n",K,RK); return 1; }
   double *rmeanr=calloc(RK?RK:1,sizeof(double)),*meanr=calloc(K?K:1,sizeof(double));
-  for(u32 L=1;L<=nrid;L++) if(rcid[L]>=0) rmeanr[rcid[L]]=rr[L]/ra[L];
-  for(u32 L=1;L<=nrec;L++) if(cid[L]>=0) meanr[cid[L]]=sr[L]/sa[L];
+  double *nodez=calloc((size_t)(K+RK?K+RK:1),sizeof(double));   // per-node mean z, indexed like the solve (recto 0..K-1, ridge K..)
+  for(u32 L=1;L<=nrid;L++) if(rcid[L]>=0){ rmeanr[rcid[L]]=rr[L]/ra[L]; nodez[K+rcid[L]]=rz[L]/ra[L]; }
+  for(u32 L=1;L<=nrec;L++) if(cid[L]>=0){ meanr[cid[L]]=sr[L]/sa[L]; nodez[cid[L]]=sz[L]/sa[L]; }
   fprintf(stderr,"3D nodes: recto=%d ridge=%d (>=%d vox)\n",K,RK,minseg); PHASE("3D cc-label");
 
   // ---- 3D radial-adjacency graph (recto idx 0..K-1, ridge idx K..K+RK-1) ----
@@ -285,23 +287,61 @@ int main(int argc,char**argv){
   // toward winding ~= (radius - r_inner)/pitch fixes each component's offset from its radius
   // (reliable) WITHOUT the wrap-bridging z/same-wrap ties. Step-edges still dominate locally.
   double rmin=1e30; for(int i=0;i<K;i++) if(meanr[i]<rmin)rmin=meanr[i]; for(int i=0;i<RK;i++) if(rmeanr[i]<rmin)rmin=rmeanr[i];
+  // per-node radius indexed like the solve (recto 0..K-1, ridge K..) -- pairs with nodez[]
+  double *nodeR=malloc(NT*sizeof(double));
+  for(int i=0;i<K;i++) nodeR[i]=meanr[i]; for(int i=0;i<RK;i++) nodeR[K+i]=rmeanr[i];
   double *prior=malloc(NT*sizeof(double));
-  for(int i=0;i<K;i++) prior[i]=(meanr[i]-rmin)/pitch;
-  for(int i=0;i<RK;i++) prior[K+i]=(rmeanr[i]-rmin)/pitch;
+  for(int i=0;i<NT;i++) prior[i]=(nodeR[i]-rmin)/pitch;   // initial: constant-pitch Archimedean prior
   const double LPRI=argc>16?atof(argv[16]):0.15;        // radius-prior strength
+  // VARIABLE-PITCH SPIRAL FIT (adapted from Henderson spiral-fitting's per-slice affine +
+  // gap-scaling field, done classically): after a winding solve, fit a SMOOTH per-z spiral
+  // r ~= r0(z) + pitch(z)*w (robust Tukey line per slice, then smoothed across z), and feed
+  // it back as the prior. This replaces the single global constant `pitch`/`rmin` -> models
+  // umbilicus radial offset + locally-varying winding spacing that the constant prior can't.
+  const int SP=argc>20?atoi(argv[20]):0;                 // # spiral-fit refits; default 0 -- per-z variable
+                                                         // pitch is a no-op on L2 (pitch ~z-invariant, prior weak by design). kept for L1/full-volume.
+  double *r0z=malloc(dz*sizeof(double)),*ptz=malloc(dz*sizeof(double));
   double *wind=calloc(NT,sizeof(double)),*nw=malloc(NT*sizeof(double)),*den=malloc(NT*sizeof(double));
   for(int i=0;i<NT;i++) wind[i]=prior[i];                // warm-start from the radius prior
-  double *rw=malloc((size_t)(n1?n1:1)*sizeof(double)); for(long e=0;e<n1;e++)rw[e]=1.0;
+  double *rw=malloc((size_t)(n1?n1:1)*sizeof(double));
   const double WEQ=WEQ_ARG;
-  for(int round=0;round<4;round++){
-    for(int it=0;it<800;it++){ memset(nw,0,NT*sizeof(double)); memset(den,0,NT*sizeof(double));
-      for(long e=0;e<n1;e++){ int a=a1[e],b=b1[e]; double w=w1[e]*rw[e],s=(double)s1[e]; nw[a]+=w*(wind[b]-s);den[a]+=w; nw[b]+=w*(wind[a]+s);den[b]+=w; }
-      for(long e=0;e<n0;e++){ int a=a0[e],b=b0[e]; double w=WEQ*w0[e]; nw[a]+=w*wind[b];den[a]+=w; nw[b]+=w*wind[a];den[b]+=w; }
-      for(int i=0;i<NT;i++){ nw[i]+=LPRI*prior[i]; den[i]+=LPRI; }   // weak radius prior on every node
-      for(int i=0;i<NT;i++) if(den[i]>0) wind[i]=0.5*wind[i]+0.5*(nw[i]/den[i]); }
-    if(round<3) for(long e=0;e<n1;e++){ double res=wind[b1[e]]-wind[a1[e]]-s1[e]; double z=res/0.4; rw[e]=1.0/(1.0+z*z); }
+  for(int outer=0;outer<=SP;outer++){
+    if(outer>0){
+      // robust per-z line fit  r = r0[z] + ptz[z]*w  over nodes at that z
+      double *sa0=calloc(dz,sizeof(double)); int *valid=calloc(dz,sizeof(int));
+      for(int z=0;z<dz;z++){ (void)sa0;
+        double a=rmin,b=pitch;                            // start from global
+        for(int rep=0;rep<3;rep++){ double Sww=0,Sw=0,S1=0,Swr=0,Sr=0;
+          for(int i=0;i<NT;i++){ if((int)lround(nodez[i])!=z)continue; double w=wind[i],r=nodeR[i];
+            double e=r-(a+b*w),s=0.5*pitch,tw=(fabs(e)<s)?(1-(e/s)*(e/s))*(1-(e/s)*(e/s)):0;  // Tukey
+            Sww+=tw*w*w;Sw+=tw*w;S1+=tw;Swr+=tw*w*r;Sr+=tw*r; }
+          double det=S1*Sww-Sw*Sw; if(S1>=6&&fabs(det)>1e-9){ b=(S1*Swr-Sw*Sr)/det; a=(Sr-b*Sw)/S1; valid[z]=1; } }
+        if(b<0.3*pitch)b=0.3*pitch; if(b>3*pitch)b=3*pitch; r0z[z]=a; ptz[z]=b; }
+      // fill invalid z from nearest valid, then smooth across z (window +/-3) -> per-slice-affine smoothness
+      for(int z=0;z<dz;z++) if(!valid[z]){ int lo=z,hi=z; while(lo>=0&&!valid[lo])lo--; while(hi<dz&&!valid[hi])hi++;
+        if(lo<0&&hi>=dz){r0z[z]=rmin;ptz[z]=pitch;} else if(lo<0){r0z[z]=r0z[hi];ptz[z]=ptz[hi];}
+        else if(hi>=dz){r0z[z]=r0z[lo];ptz[z]=ptz[lo];} else { double f=(double)(z-lo)/(hi-lo); r0z[z]=r0z[lo]+f*(r0z[hi]-r0z[lo]); ptz[z]=ptz[lo]+f*(ptz[hi]-ptz[lo]); } }
+      { double *t0=malloc(dz*sizeof(double)),*t1=malloc(dz*sizeof(double));
+        for(int z=0;z<dz;z++){ double s0=0,s1=0;int n=0; for(int d=-3;d<=3;d++){int zz=z+d; if(zz<0||zz>=dz)continue; s0+=r0z[zz];s1+=ptz[zz];n++;} t0[z]=s0/n;t1[z]=s1/n; }
+        memcpy(r0z,t0,dz*sizeof(double)); memcpy(ptz,t1,dz*sizeof(double)); free(t0);free(t1); }
+      for(int i=0;i<NT;i++){ int z=(int)lround(nodez[i]); if(z<0)z=0;if(z>=dz)z=dz-1; prior[i]=(nodeR[i]-r0z[z])/ptz[z]; }
+      // report spiral-fit residual (median |r - model| in wraps)
+      double sr2=0;long ns=0; for(int i=0;i<NT;i++){ int z=(int)lround(nodez[i]);if(z<0)z=0;if(z>=dz)z=dz-1; double e=(nodeR[i]-r0z[z])/ptz[z]-wind[i]; sr2+=fabs(e);ns++; }
+      double pmn=1e30,pmx=-1e30; for(int z=0;z<dz;z++){ if(ptz[z]<pmn)pmn=ptz[z]; if(ptz[z]>pmx)pmx=ptz[z]; }
+      fprintf(stderr,"spiral-fit refit %d: pitch(z) %.1f..%.1f, mean|r-model|=%.3f wraps\n",outer,pmn,pmx,ns?sr2/ns:0);
+      free(sa0);free(valid);
+    }
+    for(long e=0;e<n1;e++)rw[e]=1.0;
+    for(int round=0;round<4;round++){
+      for(int it=0;it<800;it++){ memset(nw,0,NT*sizeof(double)); memset(den,0,NT*sizeof(double));
+        for(long e=0;e<n1;e++){ int a=a1[e],b=b1[e]; double w=w1[e]*rw[e],s=(double)s1[e]; nw[a]+=w*(wind[b]-s);den[a]+=w; nw[b]+=w*(wind[a]+s);den[b]+=w; }
+        for(long e=0;e<n0;e++){ int a=a0[e],b=b0[e]; double w=WEQ*w0[e]; nw[a]+=w*wind[b];den[a]+=w; nw[b]+=w*wind[a];den[b]+=w; }
+        for(int i=0;i<NT;i++){ nw[i]+=LPRI*prior[i]; den[i]+=LPRI; }   // weak (variable-pitch) radius prior
+        for(int i=0;i<NT;i++) if(den[i]>0) wind[i]=0.5*wind[i]+0.5*(nw[i]/den[i]); }
+      if(round<3) for(long e=0;e<n1;e++){ double res=wind[b1[e]]-wind[a1[e]]-s1[e]; double z=res/0.4; rw[e]=1.0/(1.0+z*z); }
+    }
   }
-  free(prior);
+  free(prior);free(nodeR);free(r0z);free(ptz);
   double wmin=1e30,wmax=-1e30,sres=0; long nin=0;
   for(int i=0;i<NT;i++){ if(wind[i]<wmin)wmin=wind[i]; if(wind[i]>wmax)wmax=wind[i]; }
   for(long e=0;e<n1;e++) if(rw[e]>0.5){ sres+=fabs(wind[b1[e]]-wind[a1[e]]-s1[e]); nin++; }
@@ -470,6 +510,26 @@ int main(int argc,char**argv){
     char fn[700]; snprintf(fn,sizeof fn,"%s_unroll.pgm",base); FILE*f=fopen(fn,"wb");
     if(f){ fprintf(f,"P5\n%d %d\n255\n",UW,dz); fwrite(img,1,(size_t)dz*UW,f); fclose(f);
       fprintf(stderr,"wrote %s_unroll.pgm (unrolled scroll %dx%d, %d cols/wrap; horiz=winding, vert=z)\n",base,UW,dz,SAMP); }
+    free(acc);free(cnt);free(img); }
+  // ARC-LENGTH UNROLL (adapted from spiral-fitting's area-correct flatten): mapping horizontal
+  // linearly to winding w stretches every wrap to the same width, so inner wraps (small radius,
+  // small circumference) are horizontally stretched ~N x vs outer wraps -> text distorted. The
+  // fitted Archimedean spiral gives r(w) ~= rmin + pitch*w, so physical arc length traversed is
+  // S(w) = integral 2*pi*r dw = 2*pi*(rmin*w + pitch*w^2/2). Map horizontal = S(w): each wrap
+  // gets pixels proportional to its true circumference -> aspect-correct, undistorted layers.
+  { const double Sw0=rmin*wmin+0.5*pitch*wmin*wmin, Sw1=rmin*wmax+0.5*pitch*wmax*wmax;
+    double Sspan=Sw1-Sw0; if(Sspan<1e-6)Sspan=1;
+    // resolution: keep the OUTER (densest) wrap at ~SAMP cols; dS/dw at wmax = rmin+pitch*wmax
+    const int SAMP=120; double dSmax=rmin+pitch*wmax; int UW=(int)(Sspan/(dSmax>1e-6?dSmax:1)*SAMP)+1;
+    if(UW<1)UW=1; if(UW>30000)UW=30000;
+    double *acc=calloc((size_t)dz*UW,sizeof(double)); long *cnt=calloc((size_t)dz*UW,sizeof(long));
+    for(int z=0;z<dz;z++)for(int y=0;y<dy;y++)for(int x=0;x<dx;x++){ size_t p=IDX(z,y,x); if(v[p]<athr||bar[p])continue;
+      double w=wd[p],Sw=rmin*w+0.5*pitch*w*w; int u=(int)((Sw-Sw0)/Sspan*(UW-1)); if(u<0||u>=UW)continue;
+      acc[(size_t)z*UW+u]+=v[p]; cnt[(size_t)z*UW+u]++; }
+    u8*img=malloc((size_t)dz*UW); for(size_t i=0;i<(size_t)dz*UW;i++) img[i]=cnt[i]?(u8)(acc[i]/cnt[i]):0;
+    char fn[700]; snprintf(fn,sizeof fn,"%s_unroll_arc.pgm",base); FILE*f=fopen(fn,"wb");
+    if(f){ fprintf(f,"P5\n%d %d\n255\n",UW,dz); fwrite(img,1,(size_t)dz*UW,f); fclose(f);
+      fprintf(stderr,"wrote %s_unroll_arc.pgm (arc-length unroll %dx%d; horiz=physical arc length, aspect-correct)\n",base,UW,dz); }
     free(acc);free(cnt);free(img); }
   PHASE("output");
   return 0;
