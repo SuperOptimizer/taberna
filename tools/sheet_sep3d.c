@@ -457,6 +457,20 @@ int main(int argc,char**argv){
     if(f){ int hdr[6]={dz,dy,dx,(int)z0,(int)y0,(int)x0}; fwrite(hdr,sizeof(int),6,f);
       float*wo=malloc(nn*sizeof(float)); for(size_t p=0;p<nn;p++) wo[p]=(v[p]>=athr&&!bar[p])?wd[p]:NAN;
       fwrite(wo,sizeof(float),nn,f); free(wo); fclose(f); fprintf(stderr,"wrote %s_vol.f32 (winding volume %dx%dx%d)\n",base,dz,dy,dx); } }
+  // UNROLL: the payoff. winding w advances by exactly 1 per revolution, so it IS the flattened
+  // arc-length coordinate. Lay the scroll out flat: horizontal u = winding (SAMP cols/wrap sweeps
+  // azimuth, one revolution per wrap-width), vertical = z, pixel = mean source intensity of the
+  // material at that (winding,z). A clean layered papyrus image validates the whole chain.
+  { const int SAMP=120; int UW=(int)((wmax-wmin)*SAMP)+1; if(UW<1)UW=1; if(UW>20000)UW=20000;
+    double *acc=calloc((size_t)dz*UW,sizeof(double)); long *cnt=calloc((size_t)dz*UW,sizeof(long));
+    for(int z=0;z<dz;z++)for(int y=0;y<dy;y++)for(int x=0;x<dx;x++){ size_t p=IDX(z,y,x); if(v[p]<athr||bar[p])continue;
+      int u=(int)((wd[p]-wmin)/(wmax-wmin>1e-9?wmax-wmin:1)*(UW-1)); if(u<0||u>=UW)continue;
+      acc[(size_t)z*UW+u]+=v[p]; cnt[(size_t)z*UW+u]++; }
+    u8*img=malloc((size_t)dz*UW); for(size_t i=0;i<(size_t)dz*UW;i++) img[i]=cnt[i]?(u8)(acc[i]/cnt[i]):0;
+    char fn[700]; snprintf(fn,sizeof fn,"%s_unroll.pgm",base); FILE*f=fopen(fn,"wb");
+    if(f){ fprintf(f,"P5\n%d %d\n255\n",UW,dz); fwrite(img,1,(size_t)dz*UW,f); fclose(f);
+      fprintf(stderr,"wrote %s_unroll.pgm (unrolled scroll %dx%d, %d cols/wrap; horiz=winding, vert=z)\n",base,UW,dz,SAMP); }
+    free(acc);free(cnt);free(img); }
   PHASE("output");
   return 0;
 }
