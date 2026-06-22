@@ -26,6 +26,9 @@
 #include "eval/topo.h"
 #include "annotate/umbilicus.h"
 
+#ifndef M_PI
+#define M_PI 3.14159265358979323846
+#endif
 static double tnow(void){ struct timespec ts; clock_gettime(CLOCK_MONOTONIC,&ts); return ts.tv_sec+ts.tv_nsec*1e-9; }
 // separable box smooth (radius r) of a float field, in place via a scratch buffer.
 static void box2d(float *f, float *tmp, int d, int r){
@@ -158,6 +161,7 @@ static double measure_pitch(const u8 *v, int d, double cyf, double cxf, int athr
  * (vs==0) are deep minima always counted. */
 static int count_valleys(const float*vs,int d,double y,double x,double uy,double ux,
                          int kstop,double prom){
+  if(prom<0) return 1;            // sentinel: baseline mode (assume +1, no valley counting)
   if(kstop<2) return 1;
   double cmax=-1e30,cmin=1e30; int dir=0,nv=0;
   for(int t=0;t<=kstop;t++){
@@ -411,7 +415,7 @@ int main(int argc,char**argv){
   // flanking ridge to count as an inter-sheet boundary. Scaled to the air cut (faint
   // intra-core minima sit a fraction of athr below the sheet centres); air gaps (vs==0)
   // always clear it. Tunable via argv (default 0.35*athr).
-  double vprom = argc>10? atof(argv[10]) : 0.35*athr; if(vprom<6) vprom=6;
+  double vprom = argc>10? atof(argv[10]) : 0.35*athr; if(vprom>=0 && vprom<6) vprom=6;  // <0 = baseline +1 mode
   fprintf(stderr,"radial pitch=%.1f vox/wrap -> walk=%d tie=%d  valley-prom=%.1f\n",pitch,walkr,tier,vprom); PHASE("threshold+pitch");
 
   // (3+4) radial-adjacency graph over the recto rims + winding fit (the helper)
@@ -633,6 +637,73 @@ int main(int argc,char**argv){
       snprintf(fn,sizeof fn,"%s_wraps.ppm",base);
       f=fopen(fn,"wb"); if(f){ fprintf(f,"P6\n%d %d\n255\n",d,d); fwrite(rgb,1,nn*3,f); fclose(f); }
       printf("wrote %s (dense per-wrap segmentation = the spiral, banded by winding)\n",fn);
+
+      // ===== QUALITY METRICS: grade the spiral fit from the dense winding field wd[] =====
+      // These measure the things the edge-residual does NOT: skip/under-count (geometry),
+      // sheet switches (radial monotonicity), and per-wrap integrity (coverage/fragments/holes).
+      {
+        // (a) GEOMETRIC CONSISTENCY: a correct fit has wraps ~= radial-span / pitch.
+        long *rh=calloc(4096,sizeof(long)); long rn=0;
+        for(size_t p=0;p<nn;p++) if(v[p]>=athr){ int yy=(int)(p/d),xx=(int)(p%d); double rr=hypot(yy-cyf,xx-cxf); int ri=(int)rr; if(ri>=0&&ri<4096){rh[ri]++;rn++;} }
+        double Rin=0,Rout=0; long acc=0; int gotin=0;
+        for(int i=0;i<4096;i++){ acc+=rh[i]; if(!gotin && acc>=rn*0.02){Rin=i;gotin=1;} if(acc>=rn*0.98){Rout=i;break;} }
+        free(rh);
+        double span=Rout-Rin, geomw=span/fmax(pitch,1e-6);
+        printf("METRIC geom-consistency  wraps=%d  pitch=%.1f  radial-span=%.0f  implied-wraps=%.1f  rel.err=%.2f\n",
+               nwrap,pitch,span,geomw,fabs(nwrap-geomw)/fmax(geomw,1));
+
+        // (b) RADIAL MONOTONICITY (switch rate) + LOCAL PITCH UNIFORMITY via outward rays.
+        // Along an outward ray the winding should rise (or fall) monotonically by ~1/pitch
+        // per px. Backward steps and >1-wrap jumps are sheet switches. Integer-crossing
+        // spacings give the local pitch -> CoV = how uniform the wrap spacing is.
+        long steps=0,backw=0,jumps=0; double psum=0,psum2=0; long pn=0; int Rr=(int)Rout+4;
+        for(int a=0;a<360;a++){ double th=a*M_PI/180.0, uy=sin(th),ux=cos(th);
+          double w0=0,w1=0; int n0c=0;
+          for(int k=2;k<Rr;k++){ int yy=(int)lround(cyf+uy*k),xx=(int)lround(cxf+ux*k); if(yy<0||yy>=d||xx<0||xx>=d)break;
+            size_t q=(size_t)yy*d+xx; if(v[q]<athr||bar[q])continue; if(!n0c)w0=wd[q]; w1=wd[q]; n0c++; }
+          if(n0c<5) continue; double sgn=(w1>=w0)?1.0:-1.0;
+          double pw=0,pr=-1; int havep=0;
+          for(int k=2;k<Rr;k++){ int yy=(int)lround(cyf+uy*k),xx=(int)lround(cxf+ux*k); if(yy<0||yy>=d||xx<0||xx>=d)break;
+            size_t q=(size_t)yy*d+xx; if(v[q]<athr||bar[q])continue; double w=wd[q];
+            if(havep){ double diff=(w-pw)*sgn; steps++; if(diff<-0.3)backw++; if(diff>1.5)jumps++;
+              if((int)floor(pw)!=(int)floor(w) && fabs(w-pw)<1.5){ if(pr>=0){ double sp2=k-pr; if(sp2>1&&sp2<5*pitch){psum+=sp2;psum2+=sp2*sp2;pn++;} } pr=k; } }
+            pw=w; havep=1; } }
+        printf("METRIC switch-rate       %.1f backward + %.1f wrap-jump  per 1000 radial steps  (%ld+%ld over %ld)\n",
+               1000.0*backw/fmax(steps,1),1000.0*jumps/fmax(steps,1),backw,jumps,steps);
+        if(pn>3){ double pm=psum/pn, pv=psum2/pn-pm*pm; printf("METRIC pitch-uniformity  local-pitch mean=%.1f  CoV=%.2f  (n=%ld spacings)\n",pm,sqrt(fmax(0,pv))/fmax(pm,1e-6),pn); }
+
+        // (c) PER-WRAP INTEGRITY: for each integer band, angular coverage (fraction of 360
+        // it spans), fragment count (b0, connected pieces), and enclosed holes (b1). A clean
+        // wrap is a single arc covering most of 360 with no extra loops; switches break it
+        // into many fragments / spurious enclosed holes.
+        u8 *bm=malloc(nn); u32 *bl=calloc(nn,sizeof(u32));
+        double covs[4096]; int frags[4096],holes[4096]; int nbm=0,nbroken=0;
+        for(int w=wlo; w<=whi && nbm<4096; w++){
+          long cnt=0; int abins[72]={0};
+          for(size_t p=0;p<nn;p++){ int in=(v[p]>=athr && !bar[p] && (int)lround(wd[p])==w); bm[p]=(u8)in;
+            if(in){cnt++; int yy=(int)(p/d),xx=(int)(p%d); double ang=atan2((double)yy-cyf,(double)xx-cxf); int bi=(int)((ang+M_PI)/(2*M_PI)*72); if(bi<0)bi=0; if(bi>71)bi=71; abins[bi]=1; } }
+          if(cnt<150) continue;
+          int abocc=0; for(int i=0;i<72;i++)abocc+=abins[i];
+          u32 nc=cc_label(bm,1,d,d,TOPO_CONN26,bl); long*ca2=calloc((size_t)nc+1,sizeof(long));
+          for(size_t p=0;p<nn;p++)ca2[bl[p]]++; int frag=0; for(u32 L=1;L<=nc;L++) if(ca2[L]>=20)frag++; free(ca2);
+          for(size_t p=0;p<nn;p++) bm[p]=!bm[p];                        // complement for hole-counting
+          u32 hc=cc_label(bm,1,d,d,TOPO_CONN6,bl); char*tb=calloc((size_t)hc+1,1);
+          for(int x=0;x<d;x++){tb[bl[x]]=1; tb[bl[(size_t)(d-1)*d+x]]=1;} for(int y=0;y<d;y++){tb[bl[(size_t)y*d]]=1; tb[bl[(size_t)y*d+d-1]]=1;}
+          long*ha=calloc((size_t)hc+1,sizeof(long)); for(size_t p=0;p<nn;p++)ha[bl[p]]++;
+          int hole=0; for(u32 L=1;L<=hc;L++) if(!tb[L]&&ha[L]>=15)hole++; free(tb);free(ha);
+          covs[nbm]=abocc/72.0; frags[nbm]=frag; holes[nbm]=hole;
+          if(covs[nbm]<0.5 || frag>3) nbroken++; nbm++;
+        }
+        free(bm);free(bl);
+        if(nbm>0){ for(int i=0;i<nbm;i++)for(int j=i+1;j<nbm;j++){
+            if(covs[j]<covs[i]){double t=covs[i];covs[i]=covs[j];covs[j]=t;}
+            if(frags[j]<frags[i]){int t=frags[i];frags[i]=frags[j];frags[j]=t;}
+            if(holes[j]<holes[i]){int t=holes[i];holes[i]=holes[j];holes[j]=t;} }
+          printf("METRIC per-wrap          bands=%d  median-coverage=%.0f%%  median-fragments=%d  median-holes=%d  broken=%d/%d\n",
+                 nbm,100*covs[nbm/2],frags[nbm/2],holes[nbm/2],nbroken,nbm); }
+      }
+      PHASE("metrics");
+
       // ALTERNATING discrete colours: consecutive wraps get distinct flat colours so the
       // per-wrap membership is visible as separate concentric rings (a voxel's colour ==
       // which wrap it belongs to). 6-colour cycle on the INTEGER wrap number.
