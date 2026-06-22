@@ -534,7 +534,12 @@ int main(int argc,char**argv){
   // (backward-switch -43..-60%, z-coherence ~3x better); OFF in the wide-pitch DELAMINATED regime
   // (pitch>=50) where sheets are sparse and the median rejects real signal (it hurt there).
   // Explicit argv[23] overrides the gate entirely (for testing).
-  const double robsig=argc>23?atof(argv[23]):(pitch<50?0.3:0.0);
+  // DEFAULT OFF: the neighbour-median robust update FLATTENS the field to ~0 -- in an unfilled
+  // region most neighbours are still at the init value, so the median is 0 and the update rejects
+  // the correct incoming winding as an outlier, blocking propagation. Its apparent backward-switch
+  // "win" was the flat field having no switches (a blind spot of that metric). Needs a redesign
+  // (e.g. robust rejection only after the field has converged) before it can be trusted again.
+  const double robsig=argc>23?atof(argv[23]):0.0;
   for(int it=0;it<200;it++) for(int color=0;color<2;color++){
     #pragma omp parallel for schedule(static)
     for(int z=0;z<dz;z++)for(int y=0;y<dy;y++)for(int x=0;x<dx;x++){ if(((x+y+z)&1)!=color)continue; size_t p=IDX(z,y,x);
@@ -633,12 +638,53 @@ int main(int argc,char**argv){
     // validated to discriminate: robust-diffusion off->on lifts this 0.41->0.80 on the core crop.
     printf("3D consistency: grad(w)-normal alignment=%.3f (1=ideal; winding varies across sheets, not along)\n", sg>1e-6?sal/sg:0); }
   #undef MAT
+  // METRIC (no ground truth): PITCH-vs-AZIMUTH smoothness. A round scroll has the same inter-wrap
+  // spacing at every angle; a squished/elliptical one has pitch(theta) varying smoothly with a
+  // 2-lobe (cos 2theta) pattern. Per angular sector fit w~a+b*r (b=dw/dr=1/pitch), report
+  // pitch(theta) spread. High CoV = elliptical/irregular; the shape itself is real geometry, the
+  // SMOOTHNESS (sector-to-sector jump) is the consistency signal. Uses all z (the field is 3D).
+  { const int NS=16,NRB=10; double Rmx=0;
+    for(int z=0;z<dz;z++)for(int y=0;y<dy;y++)for(int x=0;x<dx;x++){ size_t p=IDX(z,y,x); if(v[p]<athr||bar[p])continue;
+      double r=hypot(y-cy[z],x-cx[z]); if(r>Rmx)Rmx=r; }
+    // bin (sector, r-bin) mean winding -> per-sector slope of the BINNED profile (denoised vs the
+    // raw per-voxel scatter that washes out the slope). pitch(theta)=1/slope.
+    double *bw=calloc(NS*NRB,sizeof(double)); long *bn=calloc(NS*NRB,sizeof(long));
+    for(int y=0;y<dy;y++)for(int x=0;x<dx;x++){ size_t p=zb+(size_t)y*dx+x; if(v[p]<athr||bar[p])continue;  // mid-z only (clean radial profile)
+      double ddy=y-cy[zm],ddx=x-cx[zm],r=sqrt(ddy*ddy+ddx*ddx); if(r<4)continue;
+      int s=(int)((atan2(ddy,ddx)+M_PI)/(2*M_PI)*NS)%NS; if(s<0)s=0; int rb=(int)(r/Rmx*NRB); if(rb<0||rb>=NRB)continue;
+      bw[s*NRB+rb]+=wd[p]; bn[s*NRB+rb]++; }
+    double pmin=1e30,pmax=-1e30,sp=0,sp2=0; int npv=0; double jump=0; int njp=0; double prevp=0;
+    for(int s=0;s<NS;s++){ int lo=-1,hi=-1;            // endpoints of this sector's binned radial profile
+      for(int rb=0;rb<NRB;rb++) if(bn[s*NRB+rb]>20){ if(lo<0)lo=rb; hi=rb; }
+      if(lo<0||hi<=lo) continue;
+      double rlo=(lo+0.5)/NRB*Rmx, rhi=(hi+0.5)/NRB*Rmx;
+      double wlo=bw[s*NRB+lo]/bn[s*NRB+lo], whi=bw[s*NRB+hi]/bn[s*NRB+hi];
+      double dw=whi-wlo; if(dw<0.5)continue; double pit=(rhi-rlo)/dw;       // radius span / winding span = pitch(theta)
+      if(pit<pmin)pmin=pit; if(pit>pmax)pmax=pit; sp+=pit;sp2+=pit*pit;npv++;
+      if(npv>1){ jump+=fabs(pit-prevp); njp++; } prevp=pit; }
+    double mp=npv?sp/npv:0,vp=npv?sp2/npv-mp*mp:0;
+    printf("3D pitch-vs-azimuth: pitch %.0f..%.0f mean %.0f cov=%.2f, sector-jump=%.0f (smooth=consistent; 2-lobe spread=elliptical)\n",
+      pmin,pmax,mp,mp>1e-6?sqrt(vp>0?vp:0)/mp:0, njp?jump/njp:0);
+    free(bw);free(bn); }
   // radial winding profile at mid-z (does winding actually climb with radius?)
   { int R=(int)(0.45*(dy<dx?dy:dx)),NB=12; double bsum[12]={0};long bc[12]={0};
     for(int y=0;y<dy;y++)for(int x=0;x<dx;x++){ size_t p=zb+(size_t)y*dx+x; if(v[p]<athr||bar[p])continue;
       double ddy=y-cy[zm],ddx=x-cx[zm],r=sqrt(ddy*ddy+ddx*ddx); int b=(int)(r/R*NB); if(b<0||b>=NB)continue; bsum[b]+=wd[p];bc[b]++; }
     fprintf(stderr,"radial winding profile (mid-z, r-bin -> mean wind):");
     for(int b=0;b<NB;b++) fprintf(stderr," %.1f",bc[b]?bsum[b]/bc[b]:0); fprintf(stderr,"\n"); }
+  // METRIC (no ground truth): FILL COVERAGE -- guards against a FLAT field reading as "good" on
+  // backward-switch (a collapsed field has no backward switches). A real winding climbs with
+  // radius, so the outer third of material must have much higher winding than the inner third.
+  // climb~0 or unfilled-frac high => the dense fill collapsed (NOT a clean solve).
+  { double Rmax=0; for(int z=0;z<dz;z++)for(int y=0;y<dy;y++)for(int x=0;x<dx;x++){ size_t p=IDX(z,y,x); if(v[p]<athr||bar[p])continue;
+      double r=hypot(y-cy[z],x-cx[z]); if(r>Rmax)Rmax=r; }
+    double si=0,so=0; long ni=0,no=0,nflat=0,nmat=0;
+    for(int z=0;z<dz;z++)for(int y=0;y<dy;y++)for(int x=0;x<dx;x++){ size_t p=IDX(z,y,x); if(v[p]<athr||bar[p])continue;
+      double r=hypot(y-cy[z],x-cx[z]); nmat++; if(fabs(wd[p])<0.5)nflat++;
+      if(r<Rmax*0.33){ si+=wd[p];ni++; } else if(r>Rmax*0.66){ so+=wd[p];no++; } }
+    double climb=(no?so/no:0)-(ni?si/ni:0);
+    printf("3D fill coverage: outer-inner winding climb=%.1f wraps (should be >>0; flat=collapsed fill), unfilled |w|<0.5 frac=%.2f\n",
+      climb, nmat?(double)nflat/nmat:0); }
   // Z-COHERENCE (the whole point of a 3D solve): the radial winding profile should be the
   // SAME at every z. Compute the per-z profile and report the std across z per radius bin.
   // Low = the winding number is consistent through the volume (a coherent 3D field).
