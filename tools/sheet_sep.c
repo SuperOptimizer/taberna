@@ -351,7 +351,7 @@ int main(int argc,char**argv){
   const char*path=argv[1],*base=argv[2]; int lod=atoi(argv[3]);
   long z0=atol(argv[4]),y0=atol(argv[5]),x0=atol(argv[6]); int d=atoi(argv[7]);
   int minseg=argc>8?atoi(argv[8]):15;
-  const char*dirmode=argc>9?argv[9]:"envelope"; // radial | normal | envelope | hybrid (across-wrap direction)
+  const char*dirmode=argc>9?argv[9]:"auto"; // auto | radial | normal | envelope | hybrid (across-wrap direction)
                                                  // envelope wins on real data: global egg shape is robust,
                                                  // local structure-tensor normals too noisy at these LODs.
   mca_handle*arc=mca_open(path); if(!arc){fprintf(stderr,"open fail\n");return 1;}
@@ -394,12 +394,21 @@ int main(int argc,char**argv){
         t[p]=(f32)(s/c);} memcpy(vs,t,nn*sizeof(f32)); } free(t); }
   for(size_t p=0;p<nn;p++) if(v[p]<athr) vs[p]=0;
 
-  // ACROSS-WRAP DIRECTION (radial | normal | envelope) -- lets detection + the graph
-  // walk follow the real deformed sheets instead of the global radius.
-  if(strcmp(dirmode,"normal")==0){ g_dirx=calloc(nn,sizeof(float)); g_diry=calloc(nn,sizeof(float)); dir_normal(vs,v,athr,d,cyf,cxf,g_dirx,g_diry); }
-  else if(strcmp(dirmode,"envelope")==0){ g_dirx=calloc(nn,sizeof(float)); g_diry=calloc(nn,sizeof(float)); dir_envelope(v,athr,d,cyf,cxf,g_dirx,g_diry); }
-  else if(strcmp(dirmode,"hybrid")==0){ g_dirx=calloc(nn,sizeof(float)); g_diry=calloc(nn,sizeof(float)); dir_hybrid(vs,v,athr,d,cyf,cxf,g_dirx,g_diry); }
-  fprintf(stderr,"across-wrap direction mode: %s\n",dirmode);
+  // PITCH (vox/wrap) -- measured up-front; also the resolution proxy for AUTO dir mode.
+  double pitch = measure_pitch(v,d,cyf,cxf,athr);
+
+  // ACROSS-WRAP DIRECTION (radial | normal | envelope | hybrid | auto) -- lets detection
+  // and the graph walk follow the real deformed sheets instead of the global radius.
+  // AUTO: structure-tensor normals are reliable only when sheets are resolved over
+  // several voxels, so pick by pitch -- fine data (pitch>=16, ~L2 and below) uses HYBRID
+  // (local-normal deformation wins on real data); coarse data uses ENVELOPE (normals too
+  // noisy when downscaled, global egg-shape wins). Verified by metrics: L2 hybrid geom
+  // 0.05 / backward 15.7 vs envelope 0.14 / 19.0; L3 envelope wins.
+  char dmode[16]; snprintf(dmode,sizeof dmode,"%s", strcmp(dirmode,"auto")? dirmode : (pitch>=16.0?"hybrid":"envelope"));
+  if(strcmp(dmode,"normal")==0){ g_dirx=calloc(nn,sizeof(float)); g_diry=calloc(nn,sizeof(float)); dir_normal(vs,v,athr,d,cyf,cxf,g_dirx,g_diry); }
+  else if(strcmp(dmode,"envelope")==0){ g_dirx=calloc(nn,sizeof(float)); g_diry=calloc(nn,sizeof(float)); dir_envelope(v,athr,d,cyf,cxf,g_dirx,g_diry); }
+  else if(strcmp(dmode,"hybrid")==0){ g_dirx=calloc(nn,sizeof(float)); g_diry=calloc(nn,sizeof(float)); dir_hybrid(vs,v,athr,d,cyf,cxf,g_dirx,g_diry); }
+  fprintf(stderr,"across-wrap direction mode: %s%s\n",dmode,strcmp(dirmode,"auto")?"":" (auto)");
 
   // (1) recto faces: material with air OUTWARD along the radius
   u8*recto=calloc(nn,1);
@@ -424,7 +433,6 @@ int main(int argc,char**argv){
   // PITCH-AWARE walk radii: the radial-adjacency walk must reach ~1.5x the wrap
   // pitch (vox/wrap) to link a segment to its immediate radial neighbour -- a fixed
   // 40 over-reaches at coarse LODs (pitch~4) and under-reaches at fine ones.
-  double pitch = measure_pitch(v,d,cyf,cxf,athr);
   int walkr=(int)(1.6*pitch+0.5); if(walkr<8)walkr=8; if(walkr>120)walkr=120;
   int kmin =(int)(0.5*pitch+0.5); if(kmin<2)kmin=2;            // reject same-wrap-fragment +1 edges
   int tier =(int)(0.7*pitch+0.5); if(tier<3)tier=3; if(tier>30)tier=30;
