@@ -29,6 +29,10 @@ add_executable(surface_sweep surface_sweep.c)
 target_link_libraries(surface_sweep PRIVATE
   taberna_io taberna_segmentation taberna_postproc taberna_eval)
 
+add_executable(sd_measure sd_measure.c)
+target_link_libraries(sd_measure PRIVATE
+  taberna_io taberna_segmentation taberna_postproc taberna_eval taberna_topo fysics)
+
 add_executable(ridge_clean ridge_clean.c)
 target_link_libraries(ridge_clean PRIVATE
   taberna_io taberna_segmentation taberna_postproc taberna_eval)
@@ -141,3 +145,6 @@ target_link_libraries(air_trace PRIVATE taberna_unwrap
 
 add_executable(sheet_sep sheet_sep.c)
 target_link_libraries(sheet_sep PRIVATE taberna_io taberna_eval taberna_annotate)
+if(OpenMP_C_FOUND)
+  target_link_libraries(sheet_sep PRIVATE OpenMP::OpenMP_C)
+endif()

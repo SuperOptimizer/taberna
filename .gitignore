@@ -79,3 +79,6 @@ vcpkg_installed/
 # test output & cache
 Testing/
 .cache/
+
+# extracted Kaggle surface-detection test cubes (large, regenerable from the zip)
+sd_data/
