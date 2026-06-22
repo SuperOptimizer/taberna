@@ -160,19 +160,36 @@ static double measure_pitch(const u8 *v, int d, double cyf, double cxf, int athr
  * A zigzag/hysteresis detector with prominence `prom` is robust to noise; air gaps
  * (vs==0) are deep minima always counted. */
 static int count_valleys(const float*vs,int d,double y,double x,double uy,double ux,
-                         int kstop,double prom){
+                         int kstop,double prom,double pitchmin){
   if(prom<0) return 1;            // sentinel: baseline mode (assume +1, no valley counting)
   if(kstop<2) return 1;
-  double cmax=-1e30,cmin=1e30; int dir=0,nv=0;
+  // Extract the alternating sequence of PROMINENT extrema (peaks=ridges, valleys=gaps)
+  // along the ray. A and B are themselves ridges -> bracket with implicit peaks at the
+  // endpoints. Then a valley counts as a wrap boundary ONLY if its two FLANKING ridges
+  // are >= pitchmin apart: a true inter-wrap gap spans ~1 pitch, whereas an intra-wrap
+  // delamination slit has its flanking ridges much closer -> rejected (the fix for the
+  // false +2 over-count from cracks inside a single wrap).
+  // Ridges (peaks) are confirmed with a LARGER prominence than valleys: a real sheet
+  // centre stands well above the gaps, so requiring a bigger rise to call something a
+  // ridge stops intra-gap noise bumps from splitting one inter-wrap gap into two sub-
+  // valleys (which the pitchmin gate would then both reject -> under-count).
+  double peakprom = 1.8*prom;
+  double pos[260]; signed char typ[260]; int ne=0;             // typ: +1 ridge, -1 valley
+  pos[ne]=0; typ[ne]=1; ne++;                                  // A is a ridge
+  double cmax=-1e30,cmin=1e30,maxp=0,minp=0; int dir=0;
   for(int t=0;t<=kstop;t++){
     int iy=(int)lround(y+uy*t),ix=(int)lround(x+ux*t);
     double val = (iy<0||iy>=d||ix<0||ix>=d)?0.0:(double)vs[(size_t)iy*d+ix];
-    if(t==0){ cmax=cmin=val; continue; }
-    if(val>cmax) cmax=val;
-    if(val<cmin) cmin=val;
-    if(dir>=0 && cmax-val>=prom){ dir=-1; cmin=val; }          // crested a ridge, now descending
-    else if(dir<=0 && val-cmin>=prom){ if(dir==-1) nv++; dir=1; cmax=val; }  // climbed out of a valley
+    if(t==0){ cmax=cmin=val; maxp=minp=0; continue; }
+    if(dir>=0){ if(val>cmax){cmax=val;maxp=t;}
+      if(cmax-val>=peakprom){ if(ne<258&&typ[ne-1]!=1){pos[ne]=maxp;typ[ne]=1;ne++;} dir=-1; cmin=val; minp=t; } }
+    if(dir<=0){ if(val<cmin){cmin=val;minp=t;}
+      if(val-cmin>=prom){ if(ne<258&&typ[ne-1]!=-1){pos[ne]=minp;typ[ne]=-1;ne++;} dir=1; cmax=val; maxp=t; } }
   }
+  if(typ[ne-1]!=1){ pos[ne]=kstop; typ[ne]=1; ne++; }          // B is a ridge
+  int nv=0;
+  for(int i=1;i<ne-1;i++) if(typ[i]==-1){                      // valley flanked by peaks i-1, i+1
+    if(pos[i+1]-pos[i-1] >= pitchmin) nv++; }
   return nv;
 }
 
@@ -208,7 +225,7 @@ static int air_threshold(const u8 *v, size_t n){
  * segment to 0. Returns malloc'd wind[K]; sets *residual and *nedges. */
 static double *graph_winding(const u8 *marker, const u32 *lbl, const int *cid, int K,
                              const double *meanr, int d, double cyf, double cxf, int wmax, int kmin,
-                             const float *vs, double vprom, double *residual, long *nedges){
+                             const float *vs, double vprom, double pitchmin, double *residual, long *nedges){
   long *edge=calloc((size_t)K*K,sizeof(long));     // vote count per (a,b)
   long *step=calloc((size_t)K*K,sizeof(long));      // sum of valley-counts per (a,b)
   // Walk outward to the IMMEDIATE different-segment neighbour, then COUNT the inter-sheet
@@ -220,7 +237,7 @@ static double *graph_winding(const u8 *marker, const u32 *lbl, const int *cid, i
     for(int k=2;k<wmax;k++){ int ny_=(int)lround(y+uy*k),nx_=(int)lround(x+ux*k);
       if(ny_<0||ny_>=d||nx_<0||nx_>=d)break; size_t q=(size_t)ny_*d+nx_;
       if(marker[q]){ int Lb=cid[lbl[q]]; if(Lb>=0&&Lb!=La&&k>=kmin){
-        int nv=count_valleys(vs,d,y,x,uy,ux,k,vprom);
+        int nv=count_valleys(vs,d,y,x,uy,ux,k,vprom,pitchmin);
         edge[(size_t)La*K+Lb]++; step[(size_t)La*K+Lb]+=nv; break; } } } }
   double *wind=calloc(K,sizeof(double));
   int inner=0; for(int i=1;i<K;i++) if(meanr[i]<meanr[inner]) inner=i;
@@ -278,7 +295,7 @@ static long agg_edges(long*raw,long nraw,int K,int**ao,int**bo,long**wo,long**so
 static double *unified_winding(const u8*recto,const u32*rsl,const int*rcid,int Kr,const double*rmeanr,
                                const u8*ridge,const u32*rdl,const int*rdcid,int Kd,
                                int d,double cyf,double cxf,int wmax,int tiemax,int kmin,
-                               const float*vs,double vprom,
+                               const float*vs,double vprom,double pitchmin,
                                double*resid_p1,double*resid_eq,long*np1,long*neq){
   int K=Kr+Kd; if(K<2) return NULL;
   // SPARSE edge accumulation: push (key<<4 | valley-step) into growable lists, then
@@ -295,7 +312,7 @@ static double *unified_winding(const u8*recto,const u32*rsl,const int*rcid,int K
       for(int k=2;k<wmax;k++){ int ny_=(int)lround(y+uy*k),nx_=(int)lround(x+ux*k); \
         if(ny_<0||ny_>=d||nx_<0||nx_>=d)break; size_t q=(size_t)ny_*d+nx_; \
         if((MARK)[q]){ int Lb=(CID)[(LBL)[q]]; if(Lb>=0&&Lb!=La&&k>=kmin){ \
-          int nv=count_valleys(vs,d,y,x,uy,ux,k,vprom); if(nv>15)nv=15; \
+          int nv=count_valleys(vs,d,y,x,uy,ux,k,vprom,pitchmin); if(nv>15)nv=15; \
           PUSH1((((long)((BASE)+La)*K+(BASE)+Lb)<<4)|nv); break; } } } }
   RADWALK(recto,rsl,rcid,0);
   RADWALK(ridge,rdl,rdcid,Kr);
@@ -416,10 +433,12 @@ int main(int argc,char**argv){
   // intra-core minima sit a fraction of athr below the sheet centres); air gaps (vs==0)
   // always clear it. Tunable via argv (default 0.35*athr).
   double vprom = argc>10? atof(argv[10]) : 0.35*athr; if(vprom>=0 && vprom<6) vprom=6;  // <0 = baseline +1 mode
+  double pitchmin = (argc>11? atof(argv[11]) : 0.20)*pitch;   // a counted valley's flanking ridges must span >= this*pitch (reject intra-wrap slits);
+                                                              // 0.20 = geom-optimal on L3 (wraps match span/pitch); higher trims switches at the cost of under-count
   fprintf(stderr,"radial pitch=%.1f vox/wrap -> walk=%d tie=%d  valley-prom=%.1f\n",pitch,walkr,tier,vprom); PHASE("threshold+pitch");
 
   // (3+4) radial-adjacency graph over the recto rims + winding fit (the helper)
-  double resid; long ne; double *wind=graph_winding(recto,sl,cid,K,meanr,d,cyf,cxf,walkr,kmin,vs,vprom,&resid,&ne);
+  double resid; long ne; double *wind=graph_winding(recto,sl,cid,K,meanr,d,cyf,cxf,walkr,kmin,vs,vprom,pitchmin,&resid,&ne);
   double wmin=1e30,wmax=-1e30; for(int i=0;i<K;i++){ if(wind[i]<wmin)wmin=wind[i]; if(wind[i]>wmax)wmax=wind[i]; }
   printf("recto-graph: segments=%d edges=%ld  winding %.1f..%.1f (%.0f wraps)  edge-residual=%.3f\n",
          K,ne,wmin,wmax,wmax-wmin,resid); PHASE("recto-graph");
@@ -510,7 +529,7 @@ int main(int argc,char**argv){
   if(RK>=2){
     double*rmeanr=calloc(RK,sizeof(double));
     for(u32 L=1;L<=nrseg;L++) if(rcid[L]>=0) rmeanr[rcid[L]]=rry[L]/ra[L];
-    double rresid; long rne; double*rwind=graph_winding(ridge,rl,rcid,RK,rmeanr,d,cyf,cxf,walkr,kmin,vs,vprom,&rresid,&rne);
+    double rresid; long rne; double*rwind=graph_winding(ridge,rl,rcid,RK,rmeanr,d,cyf,cxf,walkr,kmin,vs,vprom,pitchmin,&rresid,&rne);
     double rwmin=1e30,rwmax=-1e30; for(int i=0;i<RK;i++){ if(rwind[i]<rwmin)rwmin=rwind[i]; if(rwind[i]>rwmax)rwmax=rwind[i]; }
     // coverage: fraction of material within 6px of a ridge node (how much the core is reached)
     size_t mat=0,cov=0; for(size_t p=0;p<nn;p++) if(v[p]>=athr) mat++;
@@ -541,7 +560,7 @@ int main(int argc,char**argv){
     // graph to the reliable recto (delamination) graph via same-wrap edges, so the
     // recto's spiral consistency propagates into the compressed core.
     double up1,ueq; long un1,uneq;
-    double*uw=unified_winding(recto,sl,cid,K,meanr, ridge,rl,rcid,RK, d,cyf,cxf,walkr,tier,kmin,vs,vprom,&up1,&ueq,&un1,&uneq);
+    double*uw=unified_winding(recto,sl,cid,K,meanr, ridge,rl,rcid,RK, d,cyf,cxf,walkr,tier,kmin,vs,vprom,pitchmin,&up1,&ueq,&un1,&uneq);
     if(uw){
       double uwmin=1e30,uwmax=-1e30; for(int i=0;i<K+RK;i++){ if(uw[i]<uwmin)uwmin=uw[i]; if(uw[i]>uwmax)uwmax=uw[i]; }
       printf("UNIFIED: %d recto + %d ridge nodes, %ld +1-edges (resid=%.3f) %ld same-wrap ties (resid=%.3f)  winding %.1f..%.1f (%.0f wraps)\n",
