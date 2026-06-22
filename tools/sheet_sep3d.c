@@ -404,6 +404,24 @@ int main(int argc,char**argv){
       double ddy=y-cy[zm],ddx=x-cx[zm],r=sqrt(ddy*ddy+ddx*ddx); int b=(int)(r/R*NB); if(b<0||b>=NB)continue; bsum[b]+=wd[p];bc[b]++; }
     fprintf(stderr,"radial winding profile (mid-z, r-bin -> mean wind):");
     for(int b=0;b<NB;b++) fprintf(stderr," %.1f",bc[b]?bsum[b]/bc[b]:0); fprintf(stderr,"\n"); }
+  // Z-COHERENCE (the whole point of a 3D solve): the radial winding profile should be the
+  // SAME at every z. Compute the per-z profile and report the std across z per radius bin.
+  // Low = the winding number is consistent through the volume (a coherent 3D field).
+  { int R=(int)(0.45*(dy<dx?dy:dx)),NB=12;
+    double *pm=calloc((size_t)dz*NB,sizeof(double)); long *pc=calloc((size_t)dz*NB,sizeof(long));
+    for(int z=0;z<dz;z++)for(int y=0;y<dy;y++)for(int x=0;x<dx;x++){ size_t p=IDX(z,y,x); if(v[p]<athr||bar[p])continue;
+      double r=hypot(y-cy[z],x-cx[z]); int b=(int)(r/R*NB); if(b<0||b>=NB)continue; pm[(size_t)z*NB+b]+=wd[p]; pc[(size_t)z*NB+b]++; }
+    for(int z=0;z<dz;z++)for(int b=0;b<NB;b++) if(pc[(size_t)z*NB+b]) pm[(size_t)z*NB+b]/=pc[(size_t)z*NB+b];
+    double tot=0; int nbn=0;
+    for(int b=0;b<NB;b++){ double m=0,m2=0; int n=0; for(int z=0;z<dz;z++) if(pc[(size_t)z*NB+b]){ double q=pm[(size_t)z*NB+b]; m+=q; m2+=q*q; n++; }
+      if(n>1){ m/=n; double var=m2/n-m*m; tot+=sqrt(var>0?var:0); nbn++; } }
+    printf("3D z-coherence: winding-profile std across z = %.2f wraps (lower=more coherent)\n", nbn?tot/nbn:0);
+    free(pm);free(pc); }
+  // winding VOLUME dump for downstream use (header {dz,dy,dx,z0,y0,x0} + dz*dy*dx float, NAN off-material)
+  { char fn[700]; snprintf(fn,sizeof fn,"%s_vol.f32",base); FILE*f=fopen(fn,"wb");
+    if(f){ int hdr[6]={dz,dy,dx,(int)z0,(int)y0,(int)x0}; fwrite(hdr,sizeof(int),6,f);
+      float*wo=malloc(nn*sizeof(float)); for(size_t p=0;p<nn;p++) wo[p]=(v[p]>=athr&&!bar[p])?wd[p]:NAN;
+      fwrite(wo,sizeof(float),nn,f); free(wo); fclose(f); fprintf(stderr,"wrote %s_vol.f32 (winding volume %dx%dx%d)\n",base,dz,dy,dx); } }
   PHASE("output");
   return 0;
 }
