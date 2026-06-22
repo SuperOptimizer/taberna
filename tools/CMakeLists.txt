@@ -148,3 +148,9 @@ target_link_libraries(sheet_sep PRIVATE taberna_io taberna_eval taberna_annotate
 if(OpenMP_C_FOUND)
   target_link_libraries(sheet_sep PRIVATE OpenMP::OpenMP_C)
 endif()
+
+add_executable(wind_couple wind_couple.c)
+target_link_libraries(wind_couple PRIVATE m)
+if(OpenMP_C_FOUND)
+  target_link_libraries(wind_couple PRIVATE OpenMP::OpenMP_C)
+endif()
