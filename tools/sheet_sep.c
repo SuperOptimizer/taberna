@@ -21,9 +21,14 @@
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
+#include <time.h>
 #include "io/mca.h"
 #include "eval/topo.h"
 #include "annotate/umbilicus.h"
+
+static double tnow(void){ struct timespec ts; clock_gettime(CLOCK_MONOTONIC,&ts); return ts.tv_sec+ts.tv_nsec*1e-9; }
+static double g_tl;
+#define PHASE(name) do{ fprintf(stderr,"[t] %-18s %.2fs\n",name,tnow()-g_tl); g_tl=tnow(); }while(0)
 
 /* RADIAL PITCH (vox/wrap): cast rays from the umbilicus, record radial positions of
  * material-intensity local maxima (sheet centerlines), and take the median gap between
@@ -137,44 +142,54 @@ static double *graph_winding(const u8 *marker, const u32 *lbl, const int *cid, i
  *         thickness outward of the centerline). These ties pin the ridge winding to the
  *         trustworthy recto winding, fixing the radius-offset bug that wrecked the naive
  *         merge. Anchor innermost recto = 0. Returns wind[Kr+Kd]. */
+static int cmp_long(const void*a,const void*b){ long x=*(const long*)a,y=*(const long*)b; return (x>y)-(x<y); }
+// aggregate a raw list of (a*K+b) edge keys into sparse arrays, keeping keys with run>=minc.
+static long agg_edges(long*raw,long nraw,int K,int**ao,int**bo,long**wo,long minc){
+  if(nraw==0){ *ao=malloc(sizeof(int)); *bo=malloc(sizeof(int)); *wo=malloc(sizeof(long)); return 0; }
+  qsort(raw,nraw,sizeof(long),cmp_long);
+  long ne=0; for(long i=0;i<nraw;){ long j=i; while(j<nraw&&raw[j]==raw[i])j++; if(j-i>=minc)ne++; i=j; }
+  int*ea=malloc((size_t)(ne?ne:1)*sizeof(int)),*eb=malloc((size_t)(ne?ne:1)*sizeof(int)); long*ew=malloc((size_t)(ne?ne:1)*sizeof(long));
+  long e=0; for(long i=0;i<nraw;){ long j=i; while(j<nraw&&raw[j]==raw[i])j++; long c=j-i;
+    if(c>=minc){ ea[e]=(int)(raw[i]/K); eb[e]=(int)(raw[i]%K); ew[e]=c; e++; } i=j; }
+  *ao=ea; *bo=eb; *wo=ew; return ne;
+}
 static double *unified_winding(const u8*recto,const u32*rsl,const int*rcid,int Kr,const double*rmeanr,
                                const u8*ridge,const u32*rdl,const int*rdcid,int Kd,
                                int d,double cyf,double cxf,int wmax,int tiemax,int kmin,
                                double*resid_p1,double*resid_eq,long*np1,long*neq){
   int K=Kr+Kd; if(K<2) return NULL;
-  long *e1=calloc((size_t)K*K,sizeof(long));   // +1 edges (count)
-  long *e0=calloc((size_t)K*K,sizeof(long));   // same-wrap ties (count)
-  // helper: radial +1 walk over a marker set, writing into e1 with a node-index base.
+  // SPARSE edge accumulation: push (a*K+b) keys into growable lists, then sort+aggregate
+  // -- O(E log E) over the ~10^5 real edges, NOT O(K*K) (214M at L2). Was the 20s phase.
+  long cap1=4096,nr1=0; long*raw1=malloc(cap1*sizeof(long));
+  long cap0=4096,nr0=0; long*raw0=malloc(cap0*sizeof(long));
+  #define PUSH1(key) do{ if(nr1>=cap1){cap1*=2;raw1=realloc(raw1,cap1*sizeof(long));} raw1[nr1++]=(key); }while(0)
+  #define PUSH0(key) do{ if(nr0>=cap0){cap0*=2;raw0=realloc(raw0,cap0*sizeof(long));} raw0[nr0++]=(key); }while(0)
   #define RADWALK(MARK,LBL,CID,BASE) \
     for(int y=0;y<d;y++)for(int x=0;x<d;x++){ size_t p=(size_t)y*d+x; if(!(MARK)[p])continue; \
       int La=(CID)[(LBL)[p]]; if(La<0)continue; double dy=y-cyf,dx=x-cxf,r=sqrt(dy*dy+dx*dx); \
       if(r<1)continue; double uy=dy/r,ux=dx/r; \
       for(int k=2;k<wmax;k++){ int ny_=(int)lround(y+uy*k),nx_=(int)lround(x+ux*k); \
         if(ny_<0||ny_>=d||nx_<0||nx_>=d)break; size_t q=(size_t)ny_*d+nx_; \
-        if((MARK)[q]){ int Lb=(CID)[(LBL)[q]]; if(Lb>=0&&Lb!=La&&k>=kmin){ e1[(size_t)((BASE)+La)*K+(BASE)+Lb]++; break; } } } }
+        if((MARK)[q]){ int Lb=(CID)[(LBL)[q]]; if(Lb>=0&&Lb!=La&&k>=kmin){ PUSH1((long)((BASE)+La)*K+(BASE)+Lb); break; } } } }
   RADWALK(recto,rsl,rcid,0);
   RADWALK(ridge,rdl,rdcid,Kr);
   #undef RADWALK
-  // same-wrap ties: from each ridge voxel walk OUTWARD up to 6 vox; first recto hit = same wrap.
+  // same-wrap ties: from each ridge voxel walk OUTWARD; first recto hit = same wrap.
   for(int y=0;y<d;y++)for(int x=0;x<d;x++){ size_t p=(size_t)y*d+x; if(!ridge[p])continue;
     int Ld=rdcid[rdl[p]]; if(Ld<0)continue; double dy=y-cyf,dx=x-cxf,r=sqrt(dy*dy+dx*dx);
     if(r<1)continue; double uy=dy/r,ux=dx/r;
     for(int k=1;k<=tiemax;k++){ int oy=(int)lround(y+uy*k),ox=(int)lround(x+ux*k);
       if(oy<0||oy>=d||ox<0||ox>=d)break; size_t q=(size_t)oy*d+ox;
-      if(recto[q]){ int Lr=rcid[rsl[q]]; if(Lr>=0){ e0[(size_t)(Kr+Ld)*K+Lr]++; } break; } } }
-  // innermost recto node = absolute anchor (winding 0)
+      if(recto[q]){ int Lr=rcid[rsl[q]]; if(Lr>=0){ PUSH0((long)(Kr+Ld)*K+Lr); } break; } } }
+  #undef PUSH1
+  #undef PUSH0
   int inner=0; for(int i=1;i<Kr;i++) if(rmeanr[i]<rmeanr[inner]) inner=i;
-  const double WEQ=3.0;                          // same-wrap ties outweigh single +1 edges
+  const double WEQ=3.0;
   double *wind=calloc(K,sizeof(double));
-  // SPARSE edge lists (offset +1 and same-wrap 0): O(iters*E) not O(iters*K*K).
-  long n1=0,n0=0;
-  for(int a=0;a<K;a++)for(int b=0;b<K;b++){ if(e1[(size_t)a*K+b]>=3)n1++; if(e0[(size_t)a*K+b]>=2)n0++; }
-  int *a1=malloc((size_t)(n1?n1:1)*sizeof(int)),*b1=malloc((size_t)(n1?n1:1)*sizeof(int)); long *w1l=malloc((size_t)(n1?n1:1)*sizeof(long));
-  int *a0=malloc((size_t)(n0?n0:1)*sizeof(int)),*b0=malloc((size_t)(n0?n0:1)*sizeof(int)); long *w0l=malloc((size_t)(n0?n0:1)*sizeof(long));
-  { long i1=0,i0=0; for(int a=0;a<K;a++)for(int b=0;b<K;b++){
-      long u1=e1[(size_t)a*K+b]; if(u1>=3){a1[i1]=a;b1[i1]=b;w1l[i1]=u1;i1++;}
-      long u0=e0[(size_t)a*K+b]; if(u0>=2){a0[i0]=a;b0[i0]=b;w0l[i0]=u0;i0++;} } }
-  free(e1);free(e0);
+  int *a1,*b1,*a0,*b0; long *w1l,*w0l;
+  long n1=agg_edges(raw1,nr1,K,&a1,&b1,&w1l,3);
+  long n0=agg_edges(raw0,nr0,K,&a0,&b0,&w0l,2);
+  free(raw1);free(raw0);
   double*nw=malloc(K*sizeof(double)),*den=malloc(K*sizeof(double));
   for(int it=0;it<3000;it++){ memset(nw,0,K*sizeof(double)); memset(den,0,K*sizeof(double));
     for(long e=0;e<n1;e++){ int a=a1[e],b=b1[e]; long w=w1l[e]; nw[a]+=w*(wind[b]-1); den[a]+=w; nw[b]+=w*(wind[a]+1); den[b]+=w; }
@@ -208,9 +223,21 @@ int main(int argc,char**argv){
   double cyf=ucy*cs/ls - y0, cxf=ucx*cs/ls - x0;
   fprintf(stderr,"umbilicus in region coords: (y=%.0f, x=%.0f)\n",cyf,cxf);
 
-  // read region (single slice)
-  u8*v=mca_read(arc,lod,(int)z0,(int)y0,(int)x0,1,d,d); if(!v){fprintf(stderr,"region read fail\n");return 1;}
+  // read the (single z) plane. Archives are NON-SQUARE (ROI trim makes ny!=nx), so read
+  // the actual ny x nx extent CLAMPED to the archive and embed it in a SQUARE d x d buffer
+  // (remainder padded 0 = air). d<=0 -> auto-size to cover the WHOLE plane from (y0,x0).
+  int ply=fy>>lod, plx=fx>>lod;
+  if(d<=0){ int sy=ply-(int)y0, sx=plx-(int)x0; d=sy>sx?sy:sx; }
+  int dyr=d, dxr=d;
+  if((int)y0+dyr>ply) dyr=ply-(int)y0; if(dyr<0)dyr=0;
+  if((int)x0+dxr>plx) dxr=plx-(int)x0; if(dxr<0)dxr=0;
+  u8*vr=mca_read(arc,lod,(int)z0,(int)y0,(int)x0,1,dyr,dxr); if(!vr){fprintf(stderr,"region read fail\n");return 1;}
+  u8*v=calloc((size_t)d*d,1);
+  for(int yy=0;yy<dyr;yy++) memcpy(v+(size_t)yy*d, vr+(size_t)yy*dxr, (size_t)dxr);
+  free(vr);
   size_t nn=(size_t)d*d;
+  fprintf(stderr,"plane %dx%d @lod%d: read %dx%d embedded in %dx%d square\n",ply,plx,lod,dyr,dxr,d,d);
+  g_tl=tnow();
   int athr=air_threshold(v,nn);              // bimodal air/material split (was v==0)
   fprintf(stderr,"bimodal air threshold: v<%d = air, v>=%d = material\n",athr,athr);
 
@@ -241,13 +268,13 @@ int main(int argc,char**argv){
   int walkr=(int)(1.6*pitch+0.5); if(walkr<8)walkr=8; if(walkr>120)walkr=120;
   int kmin =(int)(0.5*pitch+0.5); if(kmin<2)kmin=2;            // reject same-wrap-fragment +1 edges
   int tier =(int)(0.7*pitch+0.5); if(tier<3)tier=3; if(tier>30)tier=30;
-  fprintf(stderr,"radial pitch=%.1f vox/wrap -> walk=%d tie=%d\n",pitch,walkr,tier);
+  fprintf(stderr,"radial pitch=%.1f vox/wrap -> walk=%d tie=%d\n",pitch,walkr,tier); PHASE("threshold+pitch");
 
   // (3+4) radial-adjacency graph over the recto rims + winding fit (the helper)
   double resid; long ne; double *wind=graph_winding(recto,sl,cid,K,meanr,d,cyf,cxf,walkr,kmin,&resid,&ne);
   double wmin=1e30,wmax=-1e30; for(int i=0;i<K;i++){ if(wind[i]<wmin)wmin=wind[i]; if(wind[i]>wmax)wmax=wind[i]; }
   printf("recto-graph: segments=%d edges=%ld  winding %.1f..%.1f (%.0f wraps)  edge-residual=%.3f\n",
-         K,ne,wmin,wmax,wmax-wmin,resid);
+         K,ne,wmin,wmax,wmax-wmin,resid); PHASE("recto-graph");
 
   // output: colour each delamination segment by its winding (hue cycle), on dim data
   u8*rgb=malloc(nn*3);
@@ -319,7 +346,7 @@ int main(int argc,char**argv){
     rgb[3*p]=(u8)(40+(L*97)%216); rgb[3*p+1]=(u8)(40+(L*53)%216); rgb[3*p+2]=(u8)(40+(L*191)%216);} }
   snprintf(fn,sizeof fn,"%s_seg.ppm",base);
   f=fopen(fn,"wb"); if(f){ fprintf(f,"P6\n%d %d\n255\n",d,d); fwrite(rgb,1,nn*3,f); fclose(f); }
-  printf("wrote %s (sheet pieces after delamination + valley-extension cuts)\n",fn);
+  printf("wrote %s (sheet pieces after delamination + valley-extension cuts)\n",fn); PHASE("valley-extension");
 
   // (6) RIDGE-graph: extend the spiral fit into the COMPRESSED core. Intensity ridges
   // (sheet centerlines) exist even where there is no air, so use them as graph nodes:
@@ -367,7 +394,7 @@ int main(int argc,char**argv){
     printf("  ridge nodes cover %.1f%% of material (vs delaminations only in the core)\n",100.0*cov/mat);
     snprintf(fn,sizeof fn,"%s_ridge.ppm",base);
     f=fopen(fn,"wb"); if(f){ fprintf(f,"P6\n%d %d\n255\n",d,d); fwrite(rgb,1,nn*3,f); fclose(f); }
-    printf("wrote %s (ridge-centerline graph winding, covers compressed core)\n",fn);
+    printf("wrote %s (ridge-centerline graph winding, covers compressed core)\n",fn); PHASE("ridge-graph");
 
     // (7) DELAMINATION-ANCHORED UNIFIED winding: tie the noisy core-reaching ridge
     // graph to the reliable recto (delamination) graph via same-wrap edges, so the
@@ -390,7 +417,79 @@ int main(int argc,char**argv){
         rgb[3*p]=R;rgb[3*p+1]=G;rgb[3*p+2]=B; }
       snprintf(fn,sizeof fn,"%s_unified.ppm",base);
       f=fopen(fn,"wb"); if(f){ fprintf(f,"P6\n%d %d\n255\n",d,d); fwrite(rgb,1,nn*3,f); fclose(f); }
-      printf("wrote %s (delamination-anchored unified winding)\n",fn);
+      printf("wrote %s (delamination-anchored unified winding)\n",fn); PHASE("unified");
+
+      // (8) DENSE PER-WRAP SEGMENTS: propagate the unified node winding to ALL material
+      // voxels (Jacobi diffusion within material only; recto+ridge nodes are Dirichlet
+      // anchors), then band by integer winding. Each band = ONE CONTINUOUS WRAP -- the
+      // half-integer winding contour cuts BETWEEN wraps even where they touch (no air),
+      // because the winding interpolates between the two wraps' anchors. The stack of
+      // bands is the spiral. This turns thousands of short fragments into ~N long arms.
+      // VALLEY BARRIER: a material voxel that is a radial intensity MINIMUM is an
+      // inter-sheet boundary (the faint dark line between two touching wraps). Crossing
+      // it = a SHEET SWITCH. Mark these so the winding diffusion will not flow across
+      // them -- confining each wrap's winding to its own sheet.
+      u8 *bar=calloc(nn,1);
+      #pragma omp parallel for schedule(static)
+      for(int y=0;y<d;y++)for(int x=0;x<d;x++){ size_t p=(size_t)y*d+x; if(v[p]<athr)continue;
+        double dy=y-cyf,dx=x-cxf,r=sqrt(dy*dy+dx*dx); if(r<2)continue; double uy=dy/r,ux=dx/r;
+        int iy=(int)lround(y-uy*2),ix=(int)lround(x-ux*2), oy=(int)lround(y+uy*2),ox=(int)lround(x+ux*2);
+        if(iy<0||iy>=d||ix<0||ix>=d||oy<0||oy>=d||ox<0||ox>=d)continue;
+        float c=vs[p],in=vs[(size_t)iy*d+ix],ou=vs[(size_t)oy*d+ox];
+        if(c<=in && c<=ou) bar[p]=1; }                  // radial local-min = inter-sheet boundary
+      long nbar=0; for(size_t p=0;p<nn;p++) nbar+=bar[p];
+      // ANISOTROPIC weighted diffusion: edge weight is HIGH along bright sheet centers,
+      // ~0 across valley barriers -> winding follows the sheet, never jumps to the neighbour.
+      float *wd=calloc(nn,sizeof(float)); u8 *anc=calloc(nn,1);
+      for(size_t p=0;p<nn;p++){ int idx=-1; u32 Lr=sl[p],Ld=rl[p];
+        if(Lr&&cid[Lr]>=0) idx=cid[Lr]; else if(Ld&&rcid[Ld]>=0) idx=K+rcid[Ld];
+        if(idx>=0){ wd[p]=(float)uw[idx]; anc[p]=1; } }
+      #define EW(q) ( (v[q]<athr || bar[q]) ? 0.0 : (double)(v[q]-athr+1) )   // HARD valley block
+      // RED-BLACK GAUSS-SEIDEL with SOR (omega=1.7): in-place (no double buffer), uses the
+      // newest neighbour values -> ~3-4x faster convergence than omega=1 Jacobi, so 250
+      // sweeps match the old 800. Red/black colouring keeps each colour's cells independent
+      // (4-neighbour stencil -> neighbours are the opposite colour) so it stays parallel-safe.
+      const double omega=1.7;
+      for(int it=0;it<250;it++) for(int color=0;color<2;color++){
+        #pragma omp parallel for schedule(static)
+        for(int y=0;y<d;y++)for(int x=0;x<d;x++){ if(((x+y)&1)!=color)continue; size_t p=(size_t)y*d+x;
+          if(v[p]<athr || bar[p] || anc[p]) continue;     // air + valley walls + anchors fixed
+          double s=0,wsum=0,w;
+          if(x>0)  {w=EW(p-1);s+=w*wd[p-1];wsum+=w;} if(x<d-1){w=EW(p+1);s+=w*wd[p+1];wsum+=w;}
+          if(y>0)  {w=EW(p-d);s+=w*wd[p-d];wsum+=w;} if(y<d-1){w=EW(p+d);s+=w*wd[p+d];wsum+=w;}
+          if(wsum>0){ double avg=s/wsum; wd[p]=(float)(wd[p]+omega*(avg-wd[p])); } }
+      }
+      #undef EW
+      printf("valley barriers: %ld inter-sheet-boundary px\n",nbar);
+      // band by round(winding); count distinct wraps actually present
+      int wlo=(int)floor(uwmin), whi=(int)ceil(uwmax); int nb=whi-wlo+1; if(nb<1)nb=1;
+      long *bandpx=calloc(nb,sizeof(long)); long matn=0;
+      for(size_t p=0;p<nn;p++) if(v[p]>=athr && !bar[p]){ int w=(int)lround(wd[p])-wlo; if(w<0)w=0; if(w>=nb)w=nb-1; bandpx[w]++; matn++; }
+      int nwrap=0; for(int i=0;i<nb;i++) if(bandpx[i]>0) nwrap++;
+      printf("DENSE per-wrap bands: %d wraps over %ld material px (avg %ld px/wrap)\n",nwrap,matn,nwrap?matn/nwrap:0);
+      // colour each material voxel by its wrap band (full-range ramp, no cycling)
+      double sp=(uwmax>uwmin)?uwmax-uwmin:1.0;
+      for(size_t p=0;p<nn;p++){ int g=v[p]/5; rgb[3*p]=rgb[3*p+1]=rgb[3*p+2]=(u8)g;
+        if(v[p]<athr || bar[p]) continue;
+        double t=(lround(wd[p])-uwmin)/sp; if(t<0)t=0; if(t>1)t=1;
+        double ss=t*4.0; int seg=(int)ss; double fr=ss-seg; u8 R,G,B;
+        switch(seg){ case 0:R=0;G=(u8)(255*fr);B=255;break; case 1:R=0;G=255;B=(u8)(255*(1-fr));break;
+          case 2:R=(u8)(255*fr);G=255;B=0;break; case 3:R=255;G=(u8)(255*(1-fr));B=0;break; default:R=255;G=0;B=0; }
+        rgb[3*p]=R;rgb[3*p+1]=G;rgb[3*p+2]=B; }
+      snprintf(fn,sizeof fn,"%s_wraps.ppm",base);
+      f=fopen(fn,"wb"); if(f){ fprintf(f,"P6\n%d %d\n255\n",d,d); fwrite(rgb,1,nn*3,f); fclose(f); }
+      printf("wrote %s (dense per-wrap segmentation = the spiral, banded by winding)\n",fn);
+      // ALTERNATING discrete colours: consecutive wraps get distinct flat colours so the
+      // per-wrap membership is visible as separate concentric rings (a voxel's colour ==
+      // which wrap it belongs to). 6-colour cycle on the INTEGER wrap number.
+      static const u8 PAL[6][3]={{230,40,40},{40,200,40},{60,90,255},{240,220,40},{220,60,220},{40,220,220}};
+      for(size_t p=0;p<nn;p++){ int g=v[p]/6; rgb[3*p]=rgb[3*p+1]=rgb[3*p+2]=(u8)g;
+        if(v[p]<athr || bar[p]) continue; int w=(int)lround(wd[p]); int c=((w%6)+6)%6;
+        rgb[3*p]=PAL[c][0];rgb[3*p+1]=PAL[c][1];rgb[3*p+2]=PAL[c][2]; }
+      snprintf(fn,sizeof fn,"%s_wrapsalt.ppm",base);
+      f=fopen(fn,"wb"); if(f){ fprintf(f,"P6\n%d %d\n255\n",d,d); fwrite(rgb,1,nn*3,f); fclose(f); }
+      printf("wrote %s (per-wrap, alternating discrete colours)\n",fn); PHASE("dense+propagate");
+      free(wd);free(anc);free(bandpx);free(bar);
       free(uw);
     }
   } else printf("ridge-graph: too few ridge segments\n");
