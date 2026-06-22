@@ -122,15 +122,16 @@ static double g_tl;
  * consecutive maxima. This is the TRUE wrap pitch (it scales correctly with LOD), unlike
  * the segment-radius-gap proxy (which shrinks as segment count grows). */
 static double measure_pitch(const u8 *v, int d, double cyf, double cxf, int athr){
-  // AUTOCORRELATION of the radial intensity profile: raw peak-picking locks onto
-  // noise (~2-3 vox), but the wrap periodicity shows as the first dominant autocorr
-  // lag. Per ray: build the profile, autocorrelate, find the first prominent local-max
-  // lag in [2, R/2]; median over rays = pitch. Robust + scales correctly with LOD.
+  // AGGREGATE AUTOCORRELATION of the radial intensity profile. Per-ray peak-picking is
+  // UNSTABLE across z (lags jump 11..45 for the same scroll) because each ray's first
+  // prominent lag can lock onto local texture / a sub-harmonic. The wrap periodicity is
+  // COHERENT across rays while noise is not, so we SUM each ray's normalised autocorr
+  // into one mean curve, then take its first prominent peak = pitch. Robust + z-stable.
   int R=(int)(0.45*d); if(R>800)R=800; if(R<16) return 8.0;
   double *prof=malloc(R*sizeof(double)), *ac=malloc(R*sizeof(double));
-  double lags[256]; int nl=0;
-  for(int a=0;a<180 && nl<256;a++){
-    double th=a*(3.14159265/90.0), uy=sin(th), ux=cos(th);
+  double *agg=calloc(R,sizeof(double)); long *cnt=calloc(R,sizeof(long)); int nrays=0;
+  for(int a=0;a<360;a++){
+    double th=a*(3.14159265/180.0), uy=sin(th), ux=cos(th);
     int n=0; for(int k=0;k<R;k++){ int yy=(int)lround(cyf+uy*k),xx=(int)lround(cxf+ux*k);
       double val = (yy<0||yy>=d||xx<0||xx>=d)?0 : v[(size_t)yy*d+xx];
       prof[k]= val<athr?0:val-athr; if(prof[k]>0)n=k; }       // profile, air->0, last material at n
@@ -139,14 +140,20 @@ static double measure_pitch(const u8 *v, int d, double cyf, double cxf, int athr
     for(int k=0;k<=n;k++) prof[k]-=mean;
     for(int L=0;L<=n/2;L++){ double s=0; for(int k=0;k+L<=n;k++) s+=prof[k]*prof[k+L]; ac[L]=s; }
     if(ac[0]<=0) continue;
-    int best=-1;                                               // first prominent local max, lag>=2
-    for(int L=2;L<n/2-1;L++) if(ac[L]>ac[L-1]&&ac[L]>=ac[L+1]&&ac[L]>0.15*ac[0]){ best=L; break; }
-    if(best>=2 && best<200) lags[nl++]=best;
+    for(int L=0;L<=n/2;L++){ agg[L]+=ac[L]/ac[0]; cnt[L]++; }  // normalised, accumulate
+    nrays++;
   }
   free(prof); free(ac);
-  if(nl<8) return 8.0;
-  for(int i=0;i<nl;i++)for(int j=i+1;j<nl;j++) if(lags[j]<lags[i]){double t=lags[i];lags[i]=lags[j];lags[j]=t;}
-  return lags[nl/2];
+  if(nrays<8){ free(agg);free(cnt); return 8.0; }
+  for(int L=0;L<R;L++) if(cnt[L]>0) agg[L]/=cnt[L];
+  // The wrap period is the STRONGEST autocorr peak (the most coherent periodicity), not
+  // the first -- early sidelobes / sub-harmonics produce spurious low lags. Search local
+  // maxima in [6, R/3] and take the highest. Robust to z (period is the dominant signal).
+  int best=-1; double bestv=-1;
+  for(int L=6;L<R/3;L++){
+    if(agg[L]>=agg[L-1]&&agg[L]>=agg[L-2]&&agg[L]>=agg[L+1]&&agg[L]>=agg[L+2] && agg[L]>bestv){ bestv=agg[L]; best=L; } }
+  free(agg);free(cnt);
+  return best>=6? (double)best : 8.0;
 }
 
 /* VALLEY-CROSSING COUNT: walk the smoothed profile vs() outward from (y,x) along the
@@ -364,9 +371,14 @@ int main(int argc,char**argv){
   for(size_t i=0;i<ccn;i++) ccm[i]=coarse[i]!=0; free(coarse);
   umbilicus umb; if(umbilicus_estimate(ccm,cz,ccy,ccx,9,&umb)){fprintf(stderr,"umb fail\n");return 1;}
   free(ccm);
-  double ls=(double)(1<<lod); f32 ucy,ucx; umbilicus_center(&umb,(f32)(cz/2),&ucy,&ucx);
+  // evaluate the umbilicus AT THIS z0 (it drifts with z -- the scroll axis is not vertical).
+  // z0 is in lod coords; map to coarse LOD5 z = z0*(1<<lod)/(1<<cl). Essential for multi-z:
+  // a fixed cz/2 center would misplace the spiral on off-centre slices and break z-alignment.
+  double ls=(double)(1<<lod); f32 ucy,ucx;
+  double coarse_z=(double)z0*ls/cs; if(coarse_z<0)coarse_z=0; if(coarse_z>cz-1)coarse_z=cz-1;
+  umbilicus_center(&umb,(f32)coarse_z,&ucy,&ucx);
   double cyf=ucy*cs/ls - y0, cxf=ucx*cs/ls - x0;
-  fprintf(stderr,"umbilicus in region coords: (y=%.0f, x=%.0f)\n",cyf,cxf);
+  fprintf(stderr,"archive %dx%dx%d (z,y,x) @lod%d; umbilicus@z%ld region coords (y=%.0f, x=%.0f)\n",fz,fy,fx,lod,z0,cyf,cxf);
 
   // read the (single z) plane. Archives are NON-SQUARE (ROI trim makes ny!=nx), so read
   // the actual ny x nx extent CLAMPED to the archive and embed it in a SQUARE d x d buffer
@@ -404,7 +416,11 @@ int main(int argc,char**argv){
   // (local-normal deformation wins on real data); coarse data uses ENVELOPE (normals too
   // noisy when downscaled, global egg-shape wins). Verified by metrics: L2 hybrid geom
   // 0.05 / backward 15.7 vs envelope 0.14 / 19.0; L3 envelope wins.
-  char dmode[16]; snprintf(dmode,sizeof dmode,"%s", strcmp(dirmode,"auto")? dirmode : (pitch>=16.0?"hybrid":"envelope"));
+  // RESOLUTION proxy from archive DIMS (constant across z -> z-stable, unlike per-slice
+  // pitch). Fine archives (L2+: max dim >= ~2500) resolve sheets over enough voxels that
+  // structure-tensor normals are reliable; coarse (L3+) need the global envelope.
+  int fine_res = (fx>=2500 || fy>=2500);
+  char dmode[16]; snprintf(dmode,sizeof dmode,"%s", strcmp(dirmode,"auto")? dirmode : (fine_res?"hybrid":"envelope"));
   if(strcmp(dmode,"normal")==0){ g_dirx=calloc(nn,sizeof(float)); g_diry=calloc(nn,sizeof(float)); dir_normal(vs,v,athr,d,cyf,cxf,g_dirx,g_diry); }
   else if(strcmp(dmode,"envelope")==0){ g_dirx=calloc(nn,sizeof(float)); g_diry=calloc(nn,sizeof(float)); dir_envelope(v,athr,d,cyf,cxf,g_dirx,g_diry); }
   else if(strcmp(dmode,"hybrid")==0){ g_dirx=calloc(nn,sizeof(float)); g_diry=calloc(nn,sizeof(float)); dir_hybrid(vs,v,athr,d,cyf,cxf,g_dirx,g_diry); }
@@ -609,8 +625,8 @@ int main(int argc,char**argv){
       // gap and contaminates an arc -> the coherent tangential backward-switch streaks seen
       // near barriers). Morphological close (dilate r then erode r) over MATERIAL only, so
       // it bridges gaps without thickening into the sheets. argv[14] radius (0 = off).
-      int barclose=argc>14?atoi(argv[14]):(pitch>=16.0?1:0);  // fine res: seal salty barrier gaps (cuts switches);
-                                                              // coarse res: barriers already thick, closing over-merges -> off
+      int barclose=argc>14?atoi(argv[14]):(fine_res?1:0);  // fine res: seal salty barrier gaps (cuts switches);
+                                                           // coarse res: barriers already thick, closing over-merges -> off
       if(barclose>0){ u8*tb=malloc(nn);
         for(int it2=0;it2<barclose;it2++){ memcpy(tb,bar,nn);
           for(int y=0;y<d;y++)for(int x=0;x<d;x++){ size_t q=(size_t)y*d+x; if(tb[q]||v[q]<athr)continue;
