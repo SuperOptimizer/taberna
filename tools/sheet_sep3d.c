@@ -27,7 +27,7 @@
  *
  * usage: sheet_sep3d ARCHIVE OUTBASE lod z0 y0 x0 dz dy dx [minseg=40] [pitch=auto] [LAM=0.6]
  *        [WEQ=3] [z-tie=0] [use_recto=0] [LPRI=0.15]
- * STATUS: node winding structure CORRECT; dense-field switch-rate (~190/1000) is the open work.
+ * STATUS: node winding CORRECT; dense backward-switch 316->139/1000 voxels (radial diffusion, barriers-only block). Outer region + 3D structure-tensor normals are the remaining polish.
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -320,24 +320,31 @@ int main(int argc,char**argv){
   // aligned neighbour gets ~0 (winding must NOT diffuse across wraps). A small floor would
   // leak across many wraps over the iterations and collapse the radial gradient to the
   // anchor mean. Anchors held firmly (LAM) so each sheet keeps its solved winding.
-  const double omega=1.6, LAM=(argc>12?atof(argv[12]):0.6);
-  #define TANW(comp) ({ double tt=1.0-(comp)*(comp); tt*tt*tt*tt; })   // sharp tangent gate
+  // ISOTROPIC diffusion, blocked ONLY at barriers (bar = inter-sheet radial minima). The
+  // old hard radial tangent-gate blocked WITHIN a wrap too -> the ridge winding couldn't
+  // fill the rest of its own wrap's radial band (the unanchored sheet body) -> most voxels
+  // were poorly determined -> ~30% backward switches. Within a wrap, winding flows freely
+  // (it's ~constant there); the barriers stop it at the inter-sheet boundary. A mild radial
+  // down-weight (radw) still discourages leaking through barrier GAPS without starving the fill.
+  const double omega=1.6, LAM=(argc>12?atof(argv[12]):0.6), radw=(argc>17?atof(argv[17]):1.0);
+  #define INPW(comp) (1.0 - (1.0-radw)*(comp)*(comp))   // 1 tangential, radw radial
   for(int it=0;it<200;it++) for(int color=0;color<2;color++){
     #pragma omp parallel for schedule(static)
     for(int z=0;z<dz;z++)for(int y=0;y<dy;y++)for(int x=0;x<dx;x++){ if(((x+y+z)&1)!=color)continue; size_t p=IDX(z,y,x);
       if(v[p]<athr||bar[p])continue;
       double ddy=y-cy[z],ddx=x-cx[z],r=sqrt(ddy*ddy+ddx*ddx); double uy=r>1e-6?ddy/r:0,ux=r>1e-6?ddx/r:1;
       double s=0,ws=0,w;
-      if(x>0   &&MAT(p-1)){ w=TANW(ux); s+=w*wd[p-1];ws+=w; }
-      if(x<dx-1&&MAT(p+1)){ w=TANW(ux); s+=w*wd[p+1];ws+=w; }
-      if(y>0   &&MAT(p-dx)){ w=TANW(uy); s+=w*wd[p-dx];ws+=w; }
-      if(y<dy-1&&MAT(p+dx)){ w=TANW(uy); s+=w*wd[p+dx];ws+=w; }
+      if(x>0   &&MAT(p-1)){ w=INPW(ux); s+=w*wd[p-1];ws+=w; }
+      if(x<dx-1&&MAT(p+1)){ w=INPW(ux); s+=w*wd[p+1];ws+=w; }
+      if(y>0   &&MAT(p-dx)){ w=INPW(uy); s+=w*wd[p-dx];ws+=w; }
+      if(y<dy-1&&MAT(p+dx)){ w=INPW(uy); s+=w*wd[p+dx];ws+=w; }
       if(z>0   &&MAT(p-(size_t)dy*dx)){ s+=1.0*wd[p-(size_t)dy*dx];ws+=1.0; }   // z-link (genuine 3D)
       if(z<dz-1&&MAT(p+(size_t)dy*dx)){ s+=1.0*wd[p+(size_t)dy*dx];ws+=1.0; }
       if(anc[p]){ double wa=LAM*ws+1e-6; s+=wa*ancw[p]; ws+=wa; }
       if(ws>1e-9){ double tgt=s/ws; wd[p]=(f32)(wd[p]+omega*(tgt-wd[p])); } }
   }
   #undef MAT
+  #undef INPW
   #undef TANW
   PHASE("3D dense");
 
@@ -362,13 +369,21 @@ int main(int argc,char**argv){
     char fn[700]; snprintf(fn,sizeof fn,"%s_reslice.ppm",base); FILE*f=fopen(fn,"wb");
     if(f){ fprintf(f,"P6\n%d %d\n255\n",R,dz); fwrite(img,1,(size_t)dz*R*3,f); fclose(f); } free(img);
     fprintf(stderr,"wrote %s_reslice.ppm (rows=z cols=radius; smooth vertical=coherent)\n",base); }
-  // 3D coherence metric: along outward radial rays per z, fraction of monotone steps
-  { long steps=0,back=0;
-    for(int z=0;z<dz;z++)for(int a=0;a<360;a+=2){ double th=a*M_PI/180.0,uy=sin(th),ux=cos(th); double pw=0;int hp=0;
-      for(int k=2;k<(int)(0.45*(dy<dx?dy:dx));k++){ int yy=(int)lround(cy[z]+uy*k),xx=(int)lround(cx[z]+ux*k);
-        if(yy<0||yy>=dy||xx<0||xx>=dx)break; size_t p=IDX(z,yy,xx); if(v[p]<athr||bar[p])continue; double w=wd[p];
-        if(hp){ steps++; if(w-pw<-0.3)back++; } pw=w;hp=1; } }
-    printf("3D winding: %.0f wraps, inlier-resid=%.3f, backward-rate=%.1f/1000 radial steps\n",wmax-wmin,nin?sres/nin:0,1000.0*back/(steps?steps:1)); }
+  // VOXEL-FAIR switch metric: each material voxel counted ONCE (the per-ray version
+  // over-samples the umbilicus-centered core ~360x and inflates it). Outward radial
+  // neighbour should have HIGHER winding; a drop is a backward sheet switch. Split
+  // inner-third vs outer to localise.
+  { long sw=0,matc=0,sw_in=0,mat_in=0;
+    double Rmax=0; for(int z=0;z<dz;z++)for(int y=0;y<dy;y++)for(int x=0;x<dx;x++){ size_t p=IDX(z,y,x); if(v[p]<athr||bar[p])continue;
+      double r=hypot(y-cy[z],x-cx[z]); if(r>Rmax)Rmax=r; }
+    double rcore=Rmax*0.34;
+    for(int z=0;z<dz;z++)for(int y=0;y<dy;y++)for(int x=0;x<dx;x++){ size_t p=IDX(z,y,x); if(v[p]<athr||bar[p])continue;
+      double ddy=y-cy[z],ddx=x-cx[z],r=sqrt(ddy*ddy+ddx*ddx); if(r<2)continue; double uy=ddy/r,ux=ddx/r;
+      int oy=(int)lround(y+uy*2),ox=(int)lround(x+ux*2); if(oy<0||oy>=dy||ox<0||ox>=dx)continue; size_t o=IDX(z,oy,ox);
+      if(v[o]<athr||bar[o])continue; matc++; int inr=(r<rcore); if(inr)mat_in++;
+      if((double)wd[o]-(double)wd[p]<-0.3){ sw++; if(inr)sw_in++; } }
+    printf("3D winding: %.0f wraps, inlier-resid=%.3f, backward-switch=%.1f/1000 voxels (inner %.1f / outer %.1f)\n",
+      wmax-wmin,nin?sres/nin:0,1000.0*sw/(matc?matc:1),1000.0*sw_in/(mat_in?mat_in:1),1000.0*(sw-sw_in)/((matc-mat_in)?(matc-mat_in):1)); }
   // radial winding profile at mid-z (does winding actually climb with radius?)
   { int R=(int)(0.45*(dy<dx?dy:dx)),NB=12; double bsum[12]={0};long bc[12]={0};
     for(int y=0;y<dy;y++)for(int x=0;x<dx;x++){ size_t p=zb+(size_t)y*dx+x; if(v[p]<athr||bar[p])continue;
