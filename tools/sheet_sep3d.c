@@ -197,7 +197,9 @@ int main(int argc,char**argv){
   // equivalent of VC3D's U-Net surface prediction. VC3D's gradient/TV methods failed on raw CT
   // because raw intensity has within-sheet texture; the sheetness field is high on sheets, low
   // between, texture suppressed -> windingDistance etc. should work on IT. argv[24]=usesheet.
-  int usesheet=argc>24?atoi(argv[24]):0; f32*sh=NULL;
+  int usesheet=argc>24?atoi(argv[24]):1; f32*sh=NULL;   // default ON: drives detection from the clean
+  // classical sheetness field -> backward-switch -16..-24% in ALL regimes (core AND delaminated),
+  // better z-coherence + wrap-count accuracy. argv[24]=0 reverts to raw-intensity detection.
   if(usesheet){ sh=malloc(nn*sizeof(f32)); f32*vf=malloc(nn*sizeof(f32)); for(size_t p=0;p<nn;p++) vf[p]=v[p];
     st_params sp=st_default_params(); sp.sigma_grad=1.0f; sp.sigma_tensor=(f32)(pitch*0.12); if(sp.sigma_tensor<1)sp.sigma_tensor=1; if(sp.sigma_tensor>3)sp.sigma_tensor=3;
     st_sheet_detect(vf,dz,dy,dx,&sp,sh,NULL); free(vf);
@@ -205,6 +207,13 @@ int main(int argc,char**argv){
     double smx=0; for(size_t p=0;p<nn;p++) if(sh[p]>smx)smx=sh[p];
     for(size_t p=0;p<nn;p++) sh[p]=(f32)(sh[p]/(smx>1e-6?smx:1)*255.0);   // scale to ~[0,255] for the valley/peak detectors
     fprintf(stderr,"sheetness field computed (sigma_tensor=%.1f, scaled to 0..255)\n",sp.sigma_tensor); }
+  // SIGNAL driving detection (ridge/bar) + valley-counting: the clean sheetness field when usesheet,
+  // else raw smoothed intensity. Sheets are MAXIMA in both (bright papyrus / high sheetness),
+  // inter-sheet gaps are MINIMA -> the radial max/min detector and the prominence valley-counter
+  // work unchanged; only the prominence + ridge-floor thresholds adapt to the signal's scale.
+  f32*sig = usesheet? sh : vs;
+  double sigprom = usesheet? 0.25*255.0 : vprom;    // inter-sheet valley prominence on the signal
+  double ridgethr= usesheet? 0.12*255.0 : athr;     // "is on a sheet" floor for the ridge
 
   // refine per-z umbilicus from sheet normals (robust line intersection); keeps coarse estimate
   // as init/fallback. Sanity-clamp: reject a refined center that bolts >0.6*dim from coarse.
@@ -254,8 +263,8 @@ int main(int argc,char**argv){
     // THICK ridge (2D-style): a radial local max. Per-slice labeling means this can't
     // percolate across z; within a slice the thick crest is TANGENTIALLY CONNECTED into one
     // big wrap-arc node (not fragments), so the graph is connected -- the whole point of B.
-    f32 c=vs[p],in=vs[IDX(z,iy,ix)],ou=vs[IDX(z,oy,ox)];
-    if(c>=in&&c>=ou&&c>=athr) ridge[p]=1;
+    f32 c=sig[p],in=sig[IDX(z,iy,ix)],ou=sig[IDX(z,oy,ox)];
+    if(c>=in&&c>=ou&&c>=ridgethr) ridge[p]=1;
     if(c<=in&&c<=ou) bar[p]=1;                            // radial local min = inter-sheet boundary
     for(int k=1;k<=3;k++){ int ry=(int)lround(y+uy*k),rx=(int)lround(x+ux*k);
       if(ry>=0&&ry<dy&&rx>=0&&rx<dx&&v[IDX(z,ry,rx)]<athr){ recto[p]=1; break; } } }
@@ -328,9 +337,9 @@ int main(int argc,char**argv){
   #define RADWALK(MARK,LBL,CID,BASE) \
     for(int z=0;z<dz;z++)for(int y=0;y<dy;y++)for(int x=0;x<dx;x++){ size_t p=IDX(z,y,x); if(!(MARK)[p])continue; \
       int La=(CID)[(LBL)[p]]; if(La<0)continue; double ddy=y-cy[z],ddx=x-cx[z],r=sqrt(ddy*ddy+ddx*ddx); if(r<1)continue; \
-      double uy=ddy/r,ux=ddx/r; const f32*vsz=vs+(size_t)z*dy*dx; int prevL=La; \
+      double uy=ddy/r,ux=ddx/r; const f32*vsz=sig+(size_t)z*dy*dx; int prevL=La; \
       for(int k=2;k<walkr;k++){ int ny=(int)lround(y+uy*k),nx=(int)lround(x+ux*k); if(ny<0||ny>=dy||nx<0||nx>=dx)break; size_t q=IDX(z,ny,nx); \
-        if((MARK)[q]){ int Lb=(CID)[(LBL)[q]]; if(Lb>=0&&Lb!=prevL&&k>=kmin){ int nv=count_valleys(vsz,dy,dx,y,x,uy,ux,k,vprom,pitchmin,wdedge,tvsm); if(nv>15)nv=15; \
+        if((MARK)[q]){ int Lb=(CID)[(LBL)[q]]; if(Lb>=0&&Lb!=prevL&&k>=kmin){ int nv=count_valleys(vsz,dy,dx,y,x,uy,ux,k,sigprom,pitchmin,wdedge,tvsm); if(nv>15)nv=15; \
           if(nv==0){ prevL=Lb; continue; }   /* same-wrap fragment: walk THROUGH (no tie -- ties at touches are unreliable) */ \
           PUSH(raw1,nr1,cap1,(((long)((BASE)+La)*NT+(BASE)+Lb)<<4)|nv); break; } } } }
   RADWALK(recto,sl,cid,0);
