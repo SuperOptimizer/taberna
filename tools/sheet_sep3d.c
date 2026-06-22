@@ -76,19 +76,26 @@ static double measure_pitch(const u8 *sl, int dy, int dx, double cyf, double cxf
 }
 
 // count inter-sheet valleys along the IN-PLANE radial ray at fixed z (wrap-aware, pitch-gated)
+// wdcal = total-variation per wrap (windingDistance calibration); >0 enables the rescue below.
 static int count_valleys(const f32 *vsz, int dy, int dx, double y, double x, double uy, double ux,
-                         int kstop, double prom, double pitchmin){
+                         int kstop, double prom, double pitchmin, double wdcal){
   if(kstop<2) return 1;
   double peakprom=1.8*prom; double pos[260]; signed char typ[260]; int ne=0;
   pos[ne]=0; typ[ne]=1; ne++;
-  double cmax=-1e30,cmin=1e30,maxp=0,minp=0; int dir=0;
+  double cmax=-1e30,cmin=1e30,maxp=0,minp=0; int dir=0; double tv=0,prev=0;
   for(int t=0;t<=kstop;t++){ int iy=(int)lround(y+uy*t),ix=(int)lround(x+ux*t);
     double val=(iy<0||iy>=dy||ix<0||ix>=dx)?0.0:(double)vsz[(size_t)iy*dx+ix];
-    if(t==0){cmax=cmin=val;maxp=minp=0;continue;}
+    if(t==0){cmax=cmin=val;maxp=minp=0;prev=val;continue;}
+    tv+=fabs(val-prev); prev=val;   // windingDistance: gradient integral (total variation) along the radial segment
     if(dir>=0){ if(val>cmax){cmax=val;maxp=t;} if(cmax-val>=peakprom){ if(ne<258&&typ[ne-1]!=1){pos[ne]=maxp;typ[ne]=1;ne++;} dir=-1;cmin=val;minp=t; } }
     if(dir<=0){ if(val<cmin){cmin=val;minp=t;} if(val-cmin>=prom){ if(ne<258&&typ[ne-1]!=-1){pos[ne]=minp;typ[ne]=-1;ne++;} dir=1;cmax=val;maxp=t; } } }
   if(typ[ne-1]!=1){ pos[ne]=kstop; typ[ne]=1; ne++; }
   int nv=0; for(int i=1;i<ne-1;i++) if(typ[i]==-1 && pos[i+1]-pos[i-1]>=pitchmin) nv++;
+  // windingDistance RESCUE (adapted from VC3D FiberIntersections::windingDistance): at a touch the
+  // inter-sheet valley can be too shallow for prominence detection (nv under-counts -> sheets get
+  // merged -> backward switch). The gradient integral still sees the crossing: if valley-count
+  // found nothing but TV is >=0.7 wrap's worth, the segment really did cross a (weak) boundary.
+  if(wdcal>0 && nv==0 && tv>=0.7*wdcal) nv=1;
   return nv;
 }
 
@@ -118,6 +125,7 @@ static double refine_center_slice(const f32*vs,const u8*v,int athr,int dy,int dx
 }
 
 static int cmp_long(const void*a,const void*b){ long x=*(const long*)a,y=*(const long*)b; return (x>y)-(x<y); }
+static int cmp_dbl(const void*a,const void*b){ double x=*(const double*)a,y=*(const double*)b; return (x>y)-(x<y); }
 // aggregate packed (key<<4|step) edge keys -> sparse (a,b,count,step) keeping run>=minc
 static long agg_edges(long*raw,long nraw,int K,int**ao,int**bo,long**wo,long**so,long minc){
   if(nraw==0){ *ao=malloc(4);*bo=malloc(4);*wo=malloc(8); if(so)*so=malloc(8); return 0; }
@@ -189,6 +197,24 @@ int main(int argc,char**argv){
     fprintf(stderr,"umbilicus refined from normals: %d/%d slices, mean line-RMS=%.2f, center z0=(%.0f,%.0f) zmid=(%.0f,%.0f)\n",
       nref,dz,nref?mr/nref:0,cy[0],cx[0],cy[dz/2],cx[dz/2]);
     free(ny0);free(nx0); }
+
+  // windingDistance calibration: TV (gradient integral) accrued over one wrap. Sample radial
+  // segments of length `pitch` at many material points (mid-z) and take the median TV -> the
+  // per-wrap gradient budget, so count_valleys can rescue prominence-missed crossings at touches.
+  int wdrescue=argc>22?atoi(argv[22]):0; double wdcal=0;   // default OFF: raw-intensity TV includes
+  // within-sheet texture, so it over-counts vs the prominence-gated valley detector (VC3D's
+  // windingDistance assumes a CLEAN ML surface-prediction field; doesn't transfer to raw CT).
+  if(wdrescue){ const f32*vsz=vs+(size_t)(dz/2)*dy*dx; int zm=dz/2; double cyz=cy[zm],cxz=cx[zm];
+    double *tvs=malloc((size_t)dy*dx/16*sizeof(double)); int nt=0;
+    for(int y=2;y<dy-2;y+=4)for(int x=2;x<dx-2;x+=4){ size_t p=(size_t)y*dx+x; if(v[(size_t)zm*dy*dx+p]<athr)continue;
+      double ddy=y-cyz,ddx=x-cxz,r=sqrt(ddy*ddy+ddx*ddx); if(r<pitch)continue; double uy=ddy/r,ux=ddx/r;
+      double tv=0,prev=vsz[p]; int seg=(int)(pitch+0.5);
+      for(int t=1;t<=seg;t++){ int iy=(int)lround(y+uy*t),ix=(int)lround(x+ux*t); if(iy<0||iy>=dy||ix<0||ix>=dx)break;
+        double val=vsz[(size_t)iy*dx+ix]; tv+=fabs(val-prev); prev=val; }
+      if(nt<(int)((size_t)dy*dx/16)) tvs[nt++]=tv; }
+    if(nt>0){ qsort(tvs,nt,sizeof(double),cmp_dbl); wdcal=tvs[nt/2]; }
+    free(tvs);
+    fprintf(stderr,"windingDistance calib: TV/wrap=%.1f (rescue weak-valley crossings, %d samples)\n",wdcal,nt); }
 
   // radial unit dir per voxel (in-plane, outward from per-z center)
   // ridge = radial intensity max; recto = material with air outward; bar = radial min
@@ -274,7 +300,7 @@ int main(int argc,char**argv){
       int La=(CID)[(LBL)[p]]; if(La<0)continue; double ddy=y-cy[z],ddx=x-cx[z],r=sqrt(ddy*ddy+ddx*ddx); if(r<1)continue; \
       double uy=ddy/r,ux=ddx/r; const f32*vsz=vs+(size_t)z*dy*dx; int prevL=La; \
       for(int k=2;k<walkr;k++){ int ny=(int)lround(y+uy*k),nx=(int)lround(x+ux*k); if(ny<0||ny>=dy||nx<0||nx>=dx)break; size_t q=IDX(z,ny,nx); \
-        if((MARK)[q]){ int Lb=(CID)[(LBL)[q]]; if(Lb>=0&&Lb!=prevL&&k>=kmin){ int nv=count_valleys(vsz,dy,dx,y,x,uy,ux,k,vprom,pitchmin); if(nv>15)nv=15; \
+        if((MARK)[q]){ int Lb=(CID)[(LBL)[q]]; if(Lb>=0&&Lb!=prevL&&k>=kmin){ int nv=count_valleys(vsz,dy,dx,y,x,uy,ux,k,vprom,pitchmin,wdcal); if(nv>15)nv=15; \
           if(nv==0){ prevL=Lb; continue; }   /* same-wrap fragment: walk THROUGH (no tie -- ties at touches are unreliable) */ \
           PUSH(raw1,nr1,cap1,(((long)((BASE)+La)*NT+(BASE)+Lb)<<4)|nv); break; } } } }
   RADWALK(recto,sl,cid,0);
