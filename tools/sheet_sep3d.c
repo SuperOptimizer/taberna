@@ -464,9 +464,11 @@ int main(int argc,char**argv){
   for(int i=0;i<NT;i++){ if(wind[i]<wmin)wmin=wind[i]; if(wind[i]>wmax)wmax=wind[i]; }
   for(long e=0;e<n1;e++) if(rw[e]>0.5){ sres+=fabs(wind[b1[e]]-wind[a1[e]]-s1[e]); nin++; }
   fprintf(stderr,"GLOBAL winding: %d nodes, %.1f..%.1f (%.0f wraps), inlier-resid=%.3f\n",NT,wmin,wmax,wmax-wmin,nin?sres/nin:0);
-  // GROUND-TRUTH wrap count: cast rays from the center at mid-z and count ACTUAL sheet crossings
-  // (full prominence valley-count) out to the max material radius. Median over angles = true wraps
-  // crossed. The solved wmax-wmin should match this; whichever prior matches is the correct scale.
+  // INDEPENDENT radial-crossing ESTIMATE (NOT ground truth -- we have no labelled wrap count): cast
+  // rays from the center at mid-z and count prominence sheet-crossings out to the max material
+  // radius, median over angles. This is a SECOND heuristic to cross-check the graph-solve's scale;
+  // when the two disagree (e.g. at L1 the recto/verso doublet shifts the count), the truth is some
+  // unknown value between them -- use it as a sanity bracket, not a target.
   { int zm2=dz/2; const f32*vsz=vs+(size_t)zm2*dy*dx; double cyz=cy[zm2],cxz=cx[zm2];
     double Rmx=0; for(int y=0;y<dy;y++)for(int x=0;x<dx;x++){ if(v[(size_t)zm2*dy*dx+(size_t)y*dx+x]<athr)continue;
       double rr2=hypot(y-cyz,x-cxz); if(rr2>Rmx)Rmx=rr2; }
@@ -485,8 +487,8 @@ int main(int argc,char**argv){
           if(dir<=0){ if(val<cmin)cmin=val; if(val-cmin>=prom){ if(dir==-1)nv2++; dir=1;cmax=val; } } }
         if(nv2>0)shc[nsh++]=nv2; } }
     if(nc){ qsort(cnts,nc,sizeof(double),cmp_dbl); double shm=0; if(nsh){qsort(shc,nsh,sizeof(double),cmp_dbl);shm=shc[nsh/2];}
-      if(shz) fprintf(stderr,"GROUND-TRUTH radial crossings (median/%d rays): raw-valley=%.0f, SHEETNESS=%.0f, solved=%.0f\n",nc,cnts[nc/2],shm,wmax-wmin);
-      else    fprintf(stderr,"GROUND-TRUTH radial crossings (median/%d rays): raw-valley=%.0f, solved=%.0f\n",nc,cnts[nc/2],wmax-wmin); } }
+      if(shz) fprintf(stderr,"radial-crossing estimate (median/%d rays, NOT ground truth): raw-valley=%.0f, SHEETNESS=%.0f, graph-solved=%.0f\n",nc,cnts[nc/2],shm,wmax-wmin);
+      else    fprintf(stderr,"radial-crossing estimate (median/%d rays, NOT ground truth): raw-valley=%.0f, graph-solved=%.0f\n",nc,cnts[nc/2],wmax-wmin); } }
   // does NODE winding climb with NODE radius? (isolates graph vs dense). bin by mean radius.
   { int NB=12; double bsum[12]={0};long bc[12]={0}; double Rmax=0;
     for(int i=0;i<K;i++) if(meanr[i]>Rmax)Rmax=meanr[i]; for(int i=0;i<RK;i++) if(rmeanr[i]>Rmax)Rmax=rmeanr[i];
