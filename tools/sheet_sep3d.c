@@ -77,25 +77,34 @@ static double measure_pitch(const u8 *sl, int dy, int dx, double cyf, double cxf
 
 // count inter-sheet valleys along the IN-PLANE radial ray at fixed z (wrap-aware, pitch-gated)
 // wdcal = total-variation per wrap (windingDistance calibration); >0 enables the rescue below.
+// tvsm = radial smoothing radius for the TV signal (suppresses within-sheet texture so the raw-CT
+// gradient integral measures only the pitch-scale ridge->valley swings = sheet crossings).
 static int count_valleys(const f32 *vsz, int dy, int dx, double y, double x, double uy, double ux,
-                         int kstop, double prom, double pitchmin, double wdcal){
+                         int kstop, double prom, double pitchmin, double wdcal, int tvsm){
   if(kstop<2) return 1;
   double peakprom=1.8*prom; double pos[260]; signed char typ[260]; int ne=0;
   pos[ne]=0; typ[ne]=1; ne++;
-  double cmax=-1e30,cmin=1e30,maxp=0,minp=0; int dir=0; double tv=0,prev=0;
-  for(int t=0;t<=kstop;t++){ int iy=(int)lround(y+uy*t),ix=(int)lround(x+ux*t);
-    double val=(iy<0||iy>=dy||ix<0||ix>=dx)?0.0:(double)vsz[(size_t)iy*dx+ix];
-    if(t==0){cmax=cmin=val;maxp=minp=0;prev=val;continue;}
-    tv+=fabs(val-prev); prev=val;   // windingDistance: gradient integral (total variation) along the radial segment
+  double prof[800]; int np=kstop<799?kstop:799;   // buffer large enough for full-radius ground-truth rays too
+  for(int t=0;t<=np;t++){ int iy=(int)lround(y+uy*t),ix=(int)lround(x+ux*t);
+    prof[t]=(iy<0||iy>=dy||ix<0||ix>=dx)?0.0:(double)vsz[(size_t)iy*dx+ix]; }
+  double cmax=-1e30,cmin=1e30,maxp=0,minp=0; int dir=0;
+  for(int t=0;t<=np;t++){ double val=prof[t];
+    if(t==0){cmax=cmin=val;maxp=minp=0;continue;}
     if(dir>=0){ if(val>cmax){cmax=val;maxp=t;} if(cmax-val>=peakprom){ if(ne<258&&typ[ne-1]!=1){pos[ne]=maxp;typ[ne]=1;ne++;} dir=-1;cmin=val;minp=t; } }
     if(dir<=0){ if(val<cmin){cmin=val;minp=t;} if(val-cmin>=prom){ if(ne<258&&typ[ne-1]!=-1){pos[ne]=minp;typ[ne]=-1;ne++;} dir=1;cmax=val;maxp=t; } } }
-  if(typ[ne-1]!=1){ pos[ne]=kstop; typ[ne]=1; ne++; }
+  if(typ[ne-1]!=1){ pos[ne]=np; typ[ne]=1; ne++; }
   int nv=0; for(int i=1;i<ne-1;i++) if(typ[i]==-1 && pos[i+1]-pos[i-1]>=pitchmin) nv++;
   // windingDistance RESCUE (adapted from VC3D FiberIntersections::windingDistance): at a touch the
   // inter-sheet valley can be too shallow for prominence detection (nv under-counts -> sheets get
-  // merged -> backward switch). The gradient integral still sees the crossing: if valley-count
-  // found nothing but TV is >=0.7 wrap's worth, the segment really did cross a (weak) boundary.
-  if(wdcal>0 && nv==0 && tv>=0.7*wdcal) nv=1;
+  // merged -> backward switch). Integrate the gradient of the RADIALLY-SMOOTHED profile (texture
+  // removed, only pitch-scale swings survive); if valley-count found nothing but smoothed-TV is
+  // >=0.7 wrap's worth, the segment really did cross a (weak) boundary.
+  if(wdcal>0 && nv==0){
+    double tv=0,prev=prof[0];
+    for(int t=1;t<=np;t++){ double s=0;int c=0; for(int d=-tvsm;d<=tvsm;d++){int u=t+d;if(u<0||u>np)continue;s+=prof[u];c++;}
+      double sm=s/c; tv+=fabs(sm-prev); prev=sm; }
+    if(tv>=0.7*wdcal) nv=1;
+  }
   return nv;
 }
 
@@ -201,20 +210,24 @@ int main(int argc,char**argv){
   // windingDistance calibration: TV (gradient integral) accrued over one wrap. Sample radial
   // segments of length `pitch` at many material points (mid-z) and take the median TV -> the
   // per-wrap gradient budget, so count_valleys can rescue prominence-missed crossings at touches.
-  int wdrescue=argc>22?atoi(argv[22]):0; double wdcal=0;   // default OFF: raw-intensity TV includes
-  // within-sheet texture, so it over-counts vs the prominence-gated valley detector (VC3D's
-  // windingDistance assumes a CLEAN ML surface-prediction field; doesn't transfer to raw CT).
+  int wdrescue=argc>22?atoi(argv[22]):0; double wdcal=0;
+  int tvsm=(int)(pitch/6); if(tvsm<1)tvsm=1; if(tvsm>10)tvsm=10;   // radial smoothing radius for the TV signal
+  // windingDistance on RAW CT: integrate the gradient of the radially-SMOOTHED profile (removes
+  // within-sheet texture, leaves pitch-scale ridge->valley swings). Calibrate per-wrap budget as
+  // the median smoothed-TV over one-pitch radial segments at mid-z.
   if(wdrescue){ const f32*vsz=vs+(size_t)(dz/2)*dy*dx; int zm=dz/2; double cyz=cy[zm],cxz=cx[zm];
-    double *tvs=malloc((size_t)dy*dx/16*sizeof(double)); int nt=0;
+    double *tvs=malloc((size_t)dy*dx/16*sizeof(double)); int nt=0; int seg=(int)(pitch+0.5);
     for(int y=2;y<dy-2;y+=4)for(int x=2;x<dx-2;x+=4){ size_t p=(size_t)y*dx+x; if(v[(size_t)zm*dy*dx+p]<athr)continue;
       double ddy=y-cyz,ddx=x-cxz,r=sqrt(ddy*ddy+ddx*ddx); if(r<pitch)continue; double uy=ddy/r,ux=ddx/r;
-      double tv=0,prev=vsz[p]; int seg=(int)(pitch+0.5);
-      for(int t=1;t<=seg;t++){ int iy=(int)lround(y+uy*t),ix=(int)lround(x+ux*t); if(iy<0||iy>=dy||ix<0||ix>=dx)break;
-        double val=vsz[(size_t)iy*dx+ix]; tv+=fabs(val-prev); prev=val; }
+      double prof[130]; int sp=seg<129?seg:129;
+      for(int t=0;t<=sp;t++){ int iy=(int)lround(y+uy*t),ix=(int)lround(x+ux*t); prof[t]=(iy<0||iy>=dy||ix<0||ix>=dx)?0.0:(double)vsz[(size_t)iy*dx+ix]; }
+      double tv=0,prev=prof[0];
+      for(int t=1;t<=sp;t++){ double s=0;int c=0; for(int d=-tvsm;d<=tvsm;d++){int u=t+d;if(u<0||u>sp)continue;s+=prof[u];c++;} double sm=s/c; tv+=fabs(sm-prev); prev=sm; }
       if(nt<(int)((size_t)dy*dx/16)) tvs[nt++]=tv; }
     if(nt>0){ qsort(tvs,nt,sizeof(double),cmp_dbl); wdcal=tvs[nt/2]; }
     free(tvs);
-    fprintf(stderr,"windingDistance calib: TV/wrap=%.1f (rescue weak-valley crossings, %d samples)\n",wdcal,nt); }
+    fprintf(stderr,"windingDistance calib: smoothed-TV/wrap=%.1f (radial-sm=%d, %d samples)\n",wdcal,tvsm,nt); }
+  double wdedge=(wdrescue==1)?wdcal:0;   // per-edge rescue only in mode 1 (proven harmful); mode 2 = prior only
 
   // radial unit dir per voxel (in-plane, outward from per-z center)
   // ridge = radial intensity max; recto = material with air outward; bar = radial min
@@ -265,11 +278,13 @@ int main(int argc,char**argv){
   size_t *ra=calloc((size_t)nrid+1,sizeof(size_t)),*sa=calloc((size_t)nrec+1,sizeof(size_t));
   double *rr=calloc((size_t)nrid+1,sizeof(double)),*sr=calloc((size_t)nrec+1,sizeof(double));
   double *rz=calloc((size_t)nrid+1,sizeof(double)),*sz=calloc((size_t)nrec+1,sizeof(double));  // per-node mean z (labels are per-slice)
+  double *ry=calloc((size_t)nrid+1,sizeof(double)),*rx=calloc((size_t)nrid+1,sizeof(double));  // per-node centroid (y,x) for the wd-prior ray
+  double *syc=calloc((size_t)nrec+1,sizeof(double)),*sxc=calloc((size_t)nrec+1,sizeof(double));
   double *rmn=malloc(((size_t)nrid+1)*sizeof(double)),*rmx=malloc(((size_t)nrid+1)*sizeof(double));
   for(u32 L=0;L<=nrid;L++){ rmn[L]=1e30; rmx[L]=-1e30; }
   for(int z=0;z<dz;z++)for(int y=0;y<dy;y++)for(int x=0;x<dx;x++){ size_t p=IDX(z,y,x);
     double ddy=y-cy[z],ddx=x-cx[z],r=sqrt(ddy*ddy+ddx*ddx);
-    u32 L=rl[p]; if(L){ra[L]++;rr[L]+=r;rz[L]+=z; if(r<rmn[L])rmn[L]=r; if(r>rmx[L])rmx[L]=r;} u32 M=sl[p]; if(M){sa[M]++;sr[M]+=r;sz[M]+=z;} }
+    u32 L=rl[p]; if(L){ra[L]++;rr[L]+=r;rz[L]+=z;ry[L]+=y;rx[L]+=x; if(r<rmn[L])rmn[L]=r; if(r>rmx[L])rmx[L]=r;} u32 M=sl[p]; if(M){sa[M]++;sr[M]+=r;sz[M]+=z;syc[M]+=y;sxc[M]+=x;} }
   // DIAGNOSTIC: ridge nodes whose radial extent >> pitch are MERGED multi-wrap blobs
   { int merged=0,nbig=0; size_t bigp=0; u32 bigL=0; double bigext=0;
     for(u32 L=1;L<=nrid;L++){ if(ra[L]<(size_t)minseg)continue; nbig++; double ext=rmx[L]-rmn[L];
@@ -282,8 +297,9 @@ int main(int argc,char**argv){
   if(K<2&&RK<2){ fprintf(stderr,"too few 3D nodes (recto=%d ridge=%d)\n",K,RK); return 1; }
   double *rmeanr=calloc(RK?RK:1,sizeof(double)),*meanr=calloc(K?K:1,sizeof(double));
   double *nodez=calloc((size_t)(K+RK?K+RK:1),sizeof(double));   // per-node mean z, indexed like the solve (recto 0..K-1, ridge K..)
-  for(u32 L=1;L<=nrid;L++) if(rcid[L]>=0){ rmeanr[rcid[L]]=rr[L]/ra[L]; nodez[K+rcid[L]]=rz[L]/ra[L]; }
-  for(u32 L=1;L<=nrec;L++) if(cid[L]>=0){ meanr[cid[L]]=sr[L]/sa[L]; nodez[cid[L]]=sz[L]/sa[L]; }
+  double *nodeY=calloc((size_t)(K+RK?K+RK:1),sizeof(double)),*nodeX=calloc((size_t)(K+RK?K+RK:1),sizeof(double));
+  for(u32 L=1;L<=nrid;L++) if(rcid[L]>=0){ rmeanr[rcid[L]]=rr[L]/ra[L]; nodez[K+rcid[L]]=rz[L]/ra[L]; nodeY[K+rcid[L]]=ry[L]/ra[L]; nodeX[K+rcid[L]]=rx[L]/ra[L]; }
+  for(u32 L=1;L<=nrec;L++) if(cid[L]>=0){ meanr[cid[L]]=sr[L]/sa[L]; nodez[cid[L]]=sz[L]/sa[L]; nodeY[cid[L]]=syc[L]/sa[L]; nodeX[cid[L]]=sxc[L]/sa[L]; }
   fprintf(stderr,"3D nodes: recto=%d ridge=%d (>=%d vox)\n",K,RK,minseg); PHASE("3D cc-label");
 
   // ---- 3D radial-adjacency graph (recto idx 0..K-1, ridge idx K..K+RK-1) ----
@@ -300,7 +316,7 @@ int main(int argc,char**argv){
       int La=(CID)[(LBL)[p]]; if(La<0)continue; double ddy=y-cy[z],ddx=x-cx[z],r=sqrt(ddy*ddy+ddx*ddx); if(r<1)continue; \
       double uy=ddy/r,ux=ddx/r; const f32*vsz=vs+(size_t)z*dy*dx; int prevL=La; \
       for(int k=2;k<walkr;k++){ int ny=(int)lround(y+uy*k),nx=(int)lround(x+ux*k); if(ny<0||ny>=dy||nx<0||nx>=dx)break; size_t q=IDX(z,ny,nx); \
-        if((MARK)[q]){ int Lb=(CID)[(LBL)[q]]; if(Lb>=0&&Lb!=prevL&&k>=kmin){ int nv=count_valleys(vsz,dy,dx,y,x,uy,ux,k,vprom,pitchmin,wdcal); if(nv>15)nv=15; \
+        if((MARK)[q]){ int Lb=(CID)[(LBL)[q]]; if(Lb>=0&&Lb!=prevL&&k>=kmin){ int nv=count_valleys(vsz,dy,dx,y,x,uy,ux,k,vprom,pitchmin,wdedge,tvsm); if(nv>15)nv=15; \
           if(nv==0){ prevL=Lb; continue; }   /* same-wrap fragment: walk THROUGH (no tie -- ties at touches are unreliable) */ \
           PUSH(raw1,nr1,cap1,(((long)((BASE)+La)*NT+(BASE)+Lb)<<4)|nv); break; } } } }
   RADWALK(recto,sl,cid,0);
@@ -358,6 +374,19 @@ int main(int argc,char**argv){
   for(int i=0;i<K;i++) nodeR[i]=meanr[i]; for(int i=0;i<RK;i++) nodeR[K+i]=rmeanr[i];
   double *prior=malloc(NT*sizeof(double));
   for(int i=0;i<NT;i++) prior[i]=(nodeR[i]-rmin)/pitch;   // initial: constant-pitch Archimedean prior
+  // WINDING-DISTANCE PRIOR (wdrescue==2): replace the Archimedean prior with the cumulative count
+  // of sheets crossed along the ray from the per-z center to each node (smoothed-TV / per-wrap
+  // budget). Unlike (r-rmin)/pitch this COUNTS ACTUAL SHEETS -> handles variable pitch and the
+  // off-center case where radius is a poor predictor of winding (the radius prior's worst regime).
+  if(wdrescue==2 && wdcal>0){
+    for(int i=0;i<NT;i++){ int z=(int)lround(nodez[i]); if(z<0)z=0;if(z>=dz)z=dz-1; const f32*vsz=vs+(size_t)z*dy*dx;
+      double ddy=nodeY[i]-cy[z],ddx=nodeX[i]-cx[z],r=sqrt(ddy*ddy+ddx*ddx); if(r<2){prior[i]=0;continue;} double uy=ddy/r,ux=ddx/r;
+      int R=(int)(r+0.5); double prof[700]; int sp=R<699?R:699;
+      for(int t=0;t<=sp;t++){ int iy=(int)lround(cy[z]+uy*t),ix=(int)lround(cx[z]+ux*t); prof[t]=(iy<0||iy>=dy||ix<0||ix>=dx)?0.0:(double)vsz[(size_t)iy*dx+ix]; }
+      double tv=0,prev=prof[0]; for(int t=1;t<=sp;t++){ double s=0;int c=0; for(int d=-tvsm;d<=tvsm;d++){int u=t+d;if(u<0||u>sp)continue;s+=prof[u];c++;} double sm=s/c; tv+=fabs(sm-prev); prev=sm; }
+      prior[i]=tv/wdcal; }
+    fprintf(stderr,"using windingDistance prior (cumulative sheet-crossings from center)\n");
+  }
   const double LPRI=argc>16?atof(argv[16]):0.15;        // radius-prior strength
   // VARIABLE-PITCH SPIRAL FIT (adapted from Henderson spiral-fitting's per-slice affine +
   // gap-scaling field, done classically): after a winding solve, fit a SMOOTH per-z spiral
@@ -412,6 +441,16 @@ int main(int argc,char**argv){
   for(int i=0;i<NT;i++){ if(wind[i]<wmin)wmin=wind[i]; if(wind[i]>wmax)wmax=wind[i]; }
   for(long e=0;e<n1;e++) if(rw[e]>0.5){ sres+=fabs(wind[b1[e]]-wind[a1[e]]-s1[e]); nin++; }
   fprintf(stderr,"GLOBAL winding: %d nodes, %.1f..%.1f (%.0f wraps), inlier-resid=%.3f\n",NT,wmin,wmax,wmax-wmin,nin?sres/nin:0);
+  // GROUND-TRUTH wrap count: cast rays from the center at mid-z and count ACTUAL sheet crossings
+  // (full prominence valley-count) out to the max material radius. Median over angles = true wraps
+  // crossed. The solved wmax-wmin should match this; whichever prior matches is the correct scale.
+  { int zm2=dz/2; const f32*vsz=vs+(size_t)zm2*dy*dx; double cyz=cy[zm2],cxz=cx[zm2];
+    double Rmx=0; for(int y=0;y<dy;y++)for(int x=0;x<dx;x++){ if(v[(size_t)zm2*dy*dx+(size_t)y*dx+x]<athr)continue;
+      double rr2=hypot(y-cyz,x-cxz); if(rr2>Rmx)Rmx=rr2; }
+    int NA=72; double cnts[72]; int nc=0;
+    for(int a=0;a<NA;a++){ double th=2*M_PI*a/NA,uy=sin(th),ux=cos(th); int Rr=(int)(Rmx+0.5); if(Rr>799)Rr=799;
+      int nv=count_valleys(vsz,dy,dx,cyz,cxz,uy,ux,Rr,vprom,pitchmin,0,tvsm); if(nv>0)cnts[nc++]=nv; }
+    if(nc){ qsort(cnts,nc,sizeof(double),cmp_dbl); fprintf(stderr,"GROUND-TRUTH radial crossings (median over %d rays): %.0f wraps (solved=%.0f)\n",nc,cnts[nc/2],wmax-wmin); } }
   // does NODE winding climb with NODE radius? (isolates graph vs dense). bin by mean radius.
   { int NB=12; double bsum[12]={0};long bc[12]={0}; double Rmax=0;
     for(int i=0;i<K;i++) if(meanr[i]>Rmax)Rmax=meanr[i]; for(int i=0;i<RK;i++) if(rmeanr[i]>Rmax)Rmax=rmeanr[i];
