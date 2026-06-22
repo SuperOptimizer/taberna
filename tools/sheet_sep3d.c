@@ -360,6 +360,24 @@ int main(int argc,char**argv){
   #undef MAT
   #undef INPW
   #undef TANW
+  // POST-SOLVE Z-MEDIAN: firmly-held per-slice anchors bake a whole-slice integer offset that
+  // the local z-diffusion can't overcome (it only blends boundaries). A slice offset by +1 sits
+  // between z-neighbours at 0, so a robust z-median over +/-zmedw removes the integer-jump
+  // outlier (wind_couple's winning move: median voting beats linear coupling) while a monotonic
+  // real z-tilt passes through the median unchanged. Off-material voxels excluded from the window.
+  int zmedw=argc>19?atoi(argv[19]):0;   // off: field is smooth in z (jump<<1); enable only for noisy crops
+  if(zmedw>0 && dz>2*zmedw){
+    f32 *wm=malloc((size_t)dz*dy*dx*sizeof(f32));
+    #pragma omp parallel for schedule(static)
+    for(int z=0;z<dz;z++){ f32 win[33]; for(int y=0;y<dy;y++)for(int x=0;x<dx;x++){ size_t p=IDX(z,y,x);
+      if(v[p]<athr||bar[p]){ wm[p]=wd[p]; continue; }
+      int n=0; for(int dzz=-zmedw;dzz<=zmedw;dzz++){ int zz=z+dzz; if(zz<0||zz>=dz)continue; size_t q=IDX(zz,y,x); if(v[q]<athr||bar[q])continue; win[n++]=wd[q]; }
+      if(n<3){ wm[p]=wd[p]; continue; }
+      for(int i=1;i<n;i++){ f32 t=win[i]; int j=i-1; while(j>=0&&win[j]>t){win[j+1]=win[j];j--;} win[j+1]=t; }
+      wm[p]=win[n/2]; } }
+    memcpy(wd,wm,(size_t)dz*dy*dx*sizeof(f32)); free(wm);
+    fprintf(stderr,"post-solve z-median (+/-%d slices) applied\n",zmedw);
+  }
   PHASE("3D dense");
 
   // ---- outputs: mid-z xy slice (banded), (z,radius) reslice, raw volume ----
@@ -412,10 +430,27 @@ int main(int argc,char**argv){
     for(int z=0;z<dz;z++)for(int y=0;y<dy;y++)for(int x=0;x<dx;x++){ size_t p=IDX(z,y,x); if(v[p]<athr||bar[p])continue;
       double r=hypot(y-cy[z],x-cx[z]); int b=(int)(r/R*NB); if(b<0||b>=NB)continue; pm[(size_t)z*NB+b]+=wd[p]; pc[(size_t)z*NB+b]++; }
     for(int z=0;z<dz;z++)for(int b=0;b<NB;b++) if(pc[(size_t)z*NB+b]) pm[(size_t)z*NB+b]/=pc[(size_t)z*NB+b];
-    double tot=0; int nbn=0;
+    double tot=0,tdet=0,tjump=0; int nbn=0;
     for(int b=0;b<NB;b++){ double m=0,m2=0; int n=0; for(int z=0;z<dz;z++) if(pc[(size_t)z*NB+b]){ double q=pm[(size_t)z*NB+b]; m+=q; m2+=q*q; n++; }
-      if(n>1){ m/=n; double var=m2/n-m*m; tot+=sqrt(var>0?var:0); nbn++; } }
-    printf("3D z-coherence: winding-profile std across z = %.2f wraps (lower=more coherent)\n", nbn?tot/nbn:0);
+      if(n>1){ m/=n; double var=m2/n-m*m; tot+=sqrt(var>0?var:0); nbn++;
+        // DETREND (quadratic): fit wind ~= a + c*z + e*z^2 and report residual std. A smooth
+        // z-drift OR curve (real scroll-axis tilt/curvature, NOT an error) fits the parabola;
+        // only non-smooth jumps (solver defects) survive. JUMP = mean |profile(z+1)-profile(z)|:
+        // tiny => smooth (geometry); large => integer hops (solver). detrended+jump both small
+        // => the apparent incoherence is real geometry and the 3D solve is z-consistent.
+        double S[3][3]={{0}},rhs[3]={0};
+        for(int z=0;z<dz;z++) if(pc[(size_t)z*NB+b]){ double zz=z,b0=1,b1=zz,b2=zz*zz,q=pm[(size_t)z*NB+b];
+          double bb[3]={b0,b1,b2}; for(int i=0;i<3;i++){ for(int j=0;j<3;j++)S[i][j]+=bb[i]*bb[j]; rhs[i]+=bb[i]*q; } }
+        double cf[3]={0}; { double A[3][4]; for(int i=0;i<3;i++){ for(int j=0;j<3;j++)A[i][j]=S[i][j]; A[i][3]=rhs[i]; }
+          for(int c=0;c<3;c++){ int pv=c; for(int r=c+1;r<3;r++) if(fabs(A[r][c])>fabs(A[pv][c]))pv=r; for(int k=0;k<4;k++){double t=A[c][k];A[c][k]=A[pv][k];A[pv][k]=t;}
+            if(fabs(A[c][c])<1e-9)continue; for(int r=0;r<3;r++) if(r!=c){ double f=A[r][c]/A[c][c]; for(int k=0;k<4;k++)A[r][k]-=f*A[c][k]; } }
+          for(int i=0;i<3;i++) cf[i]=fabs(A[i][i])>1e-9?A[i][3]/A[i][i]:0; }
+        double rss=0; for(int z=0;z<dz;z++) if(pc[(size_t)z*NB+b]){ double zz=z,fit=cf[0]+cf[1]*zz+cf[2]*zz*zz,e=pm[(size_t)z*NB+b]-fit; rss+=e*e; }
+        tdet+=sqrt(rss/n);
+        double js=0; int jn=0,pz=-1; for(int z=0;z<dz;z++) if(pc[(size_t)z*NB+b]){ if(pz>=0){ js+=fabs(pm[(size_t)z*NB+b]-pm[(size_t)pz*NB+b]); jn++; } pz=z; }
+        if(jn) tjump+=js/jn; } }
+    printf("3D z-coherence: std across z = %.2f wraps (raw), %.2f (quad-detrended=solver jitter), adj-z jump %.3f wraps/slice (small=smooth real tilt)\n",
+      nbn?tot/nbn:0, nbn?tdet/nbn:0, nbn?tjump/nbn:0);
     free(pm);free(pc); }
   // winding VOLUME dump for downstream use (header {dz,dy,dx,z0,y0,x0} + dz*dy*dx float, NAN off-material)
   { char fn[700]; snprintf(fn,sizeof fn,"%s_vol.f32",base); FILE*f=fopen(fn,"wb");
