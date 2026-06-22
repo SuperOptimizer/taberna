@@ -600,10 +600,10 @@ int main(int argc,char**argv){
       long nbar=0; for(size_t p=0;p<nn;p++) nbar+=bar[p];
       // ANISOTROPIC weighted diffusion: edge weight is HIGH along bright sheet centers,
       // ~0 across valley barriers -> winding follows the sheet, never jumps to the neighbour.
-      float *wd=calloc(nn,sizeof(float)); u8 *anc=calloc(nn,1);
+      float *wd=calloc(nn,sizeof(float)); u8 *anc=calloc(nn,1); float *ancw=calloc(nn,sizeof(float));
       for(size_t p=0;p<nn;p++){ int idx=-1; u32 Lr=sl[p],Ld=rl[p];
         if(Lr&&cid[Lr]>=0) idx=cid[Lr]; else if(Ld&&rcid[Ld]>=0) idx=K+rcid[Ld];
-        if(idx>=0){ wd[p]=(float)uw[idx]; anc[p]=1; } }
+        if(idx>=0){ wd[p]=(float)uw[idx]; ancw[p]=(float)uw[idx]; anc[p]=1; } }
       // SHEET-NORMAL field (2D structure tensor): make the propagation follow the LOCAL
       // deformed sheet instead of the global radius. n = dominant eigenvector of the
       // smoothed gradient tensor (points ACROSS the sheet). Diffusing ALONG the tangent
@@ -623,20 +623,26 @@ int main(int argc,char**argv){
       #define EW(q) ( (v[q]<athr || bar[q]) ? 0.0 : (double)(v[q]-athr+1) )   // HARD valley block
       // RED-BLACK GAUSS-SEIDEL with SOR (omega=1.7), ANISOTROPIC: a neighbour in direction
       // e is weighted by (1-(e.n)^2) -- ~1 along the sheet tangent, ~0 across the normal.
-      const double omega=1.7;
-      for(int it=0;it<250;it++) for(int color=0;color<2;color++){
+      // SOFT ANCHORS: the graph nodes are NOT hard-fixed (that pinned the field to their
+      // per-node winding NOISE -> round(wd) flickered azimuthally -> wraps shattered into
+      // ~30 fragments). Instead each node adds a DATA TERM pulling wd[p] toward its winding
+      // with weight LAM, while still participating in the tangential smoothing. The field
+      // tracks the nodes globally but averages out their azimuthal jitter -> continuous wraps.
+      const double omega=1.7, LAM=(argc>12?atof(argv[12]):0.1);  // soft-anchor strength; 0.1 = switch-rate parity with hard +1 baseline at full geom
+      for(int it=0;it<400;it++) for(int color=0;color<2;color++){
         #pragma omp parallel for schedule(static)
         for(int y=0;y<d;y++)for(int x=0;x<d;x++){ if(((x+y)&1)!=color)continue; size_t p=(size_t)y*d+x;
-          if(v[p]<athr || bar[p] || anc[p]) continue;     // air + valley walls + anchors fixed
+          if(v[p]<athr || bar[p]) continue;               // air + valley walls fixed; anchors now SOFT
           double nx_=nrx[p],ny_=nry[p];
           double ax=0.12+0.88*(1.0-nx_*nx_), ay=0.12+0.88*(1.0-ny_*ny_);  // tangent-biased, small isotropic floor
           double s=0,wsum=0,w;
           if(x>0)  {w=EW(p-1)*ax;s+=w*wd[p-1];wsum+=w;} if(x<d-1){w=EW(p+1)*ax;s+=w*wd[p+1];wsum+=w;}
           if(y>0)  {w=EW(p-d)*ay;s+=w*wd[p-d];wsum+=w;} if(y<d-1){w=EW(p+d)*ay;s+=w*wd[p+d];wsum+=w;}
+          if(anc[p]){ double wa=LAM*wsum+1e-6; s+=wa*ancw[p]; wsum+=wa; }   // soft data term toward node winding
           if(wsum>1e-9){ double avg=s/wsum; wd[p]=(float)(wd[p]+omega*(avg-wd[p])); } }
       }
       #undef EW
-      free(nrx);free(nry);
+      free(nrx);free(nry);free(ancw);
       printf("valley barriers: %ld inter-sheet-boundary px\n",nbar);
       // band by round(winding); count distinct wraps actually present
       int wlo=(int)floor(uwmin), whi=(int)ceil(uwmax); int nb=whi-wlo+1; if(nb<1)nb=1;
@@ -699,10 +705,22 @@ int main(int argc,char**argv){
         double covs[4096]; int frags[4096],holes[4096]; int nbm=0,nbroken=0;
         for(int w=wlo; w<=whi && nbm<4096; w++){
           long cnt=0; int abins[72]={0};
-          for(size_t p=0;p<nn;p++){ int in=(v[p]>=athr && !bar[p] && (int)lround(wd[p])==w); bm[p]=(u8)in;
+          for(size_t p=0;p<nn;p++){ int in=(v[p]>=athr && (int)lround(wd[p])==w); bm[p]=(u8)in;
             if(in){cnt++; int yy=(int)(p/d),xx=(int)(p%d); double ang=atan2((double)yy-cyf,(double)xx-cxf); int bi=(int)((ang+M_PI)/(2*M_PI)*72); if(bi<0)bi=0; if(bi>71)bi=71; abins[bi]=1; } }
           if(cnt<150) continue;
           int abocc=0; for(int i=0;i<72;i++)abocc+=abins[i];
+          // MORPHOLOGICAL CLOSE (dilate r then erode r): bridge intrinsic delamination air
+          // gaps (a wrap is physically broken into arcs by ~24% internal air) so fragments/
+          // holes measure FIELD continuity, not the scroll's delamination. A real sheet
+          // switch displaces material by ~pitch and survives the close.
+          { int R=3; u8*tb2=malloc(nn);
+            for(int it2=0;it2<R;it2++){ memcpy(tb2,bm,nn);
+              for(int yy=0;yy<d;yy++)for(int xx=0;xx<d;xx++){ size_t q=(size_t)yy*d+xx; if(tb2[q])continue;
+                if((xx>0&&tb2[q-1])||(xx<d-1&&tb2[q+1])||(yy>0&&tb2[q-d])||(yy<d-1&&tb2[q+d])) bm[q]=1; } }
+            for(int it2=0;it2<R;it2++){ memcpy(tb2,bm,nn);
+              for(int yy=0;yy<d;yy++)for(int xx=0;xx<d;xx++){ size_t q=(size_t)yy*d+xx; if(!tb2[q])continue;
+                if((xx>0&&!tb2[q-1])||(xx<d-1&&!tb2[q+1])||(yy>0&&!tb2[q-d])||(yy<d-1&&!tb2[q+d])) bm[q]=0; } }
+            free(tb2); }
           u32 nc=cc_label(bm,1,d,d,TOPO_CONN26,bl); long*ca2=calloc((size_t)nc+1,sizeof(long));
           for(size_t p=0;p<nn;p++)ca2[bl[p]]++; int frag=0; for(u32 L=1;L<=nc;L++) if(ca2[L]>=20)frag++; free(ca2);
           for(size_t p=0;p<nn;p++) bm[p]=!bm[p];                        // complement for hole-counting
@@ -711,7 +729,7 @@ int main(int argc,char**argv){
           long*ha=calloc((size_t)hc+1,sizeof(long)); for(size_t p=0;p<nn;p++)ha[bl[p]]++;
           int hole=0; for(u32 L=1;L<=hc;L++) if(!tb[L]&&ha[L]>=15)hole++; free(tb);free(ha);
           covs[nbm]=abocc/72.0; frags[nbm]=frag; holes[nbm]=hole;
-          if(covs[nbm]<0.5 || frag>3) nbroken++; nbm++;
+          if(covs[nbm]<0.5) nbroken++; nbm++;   // broken = spans < half the revolution (frag count is delamination-dominated)
         }
         free(bm);free(bl);
         if(nbm>0){ for(int i=0;i<nbm;i++)for(int j=i+1;j<nbm;j++){
