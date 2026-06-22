@@ -407,7 +407,7 @@ int main(int argc,char**argv){
   for(size_t p=0;p<nn;p++) if(v[p]<athr) vs[p]=0;
 
   // PITCH (vox/wrap) -- measured up-front; also the resolution proxy for AUTO dir mode.
-  double pitch = measure_pitch(v,d,cyf,cxf,athr);
+  double pitch = (argc>15 && atof(argv[15])>0)? atof(argv[15]) : measure_pitch(v,d,cyf,cxf,athr); // argv[15]>0 = shared pitch override (z-stacking)
 
   // ACROSS-WRAP DIRECTION (radial | normal | envelope | hybrid | auto) -- lets detection
   // and the graph walk follow the real deformed sheets instead of the global radius.
@@ -708,6 +708,15 @@ int main(int argc,char**argv){
       snprintf(fn,sizeof fn,"%s_wraps.ppm",base);
       f=fopen(fn,"wb"); if(f){ fprintf(f,"P6\n%d %d\n255\n",d,d); fwrite(rgb,1,nn*3,f); fclose(f); }
       printf("wrote %s (dense per-wrap segmentation = the spiral, banded by winding)\n",fn);
+      // RAW WINDING DUMP for 3D stacking: d, geometry, then d*d float winding (NAN where
+      // not material/barrier). Sidecar lets a stacker align slices across z.
+      { char wf[600]; snprintf(wf,sizeof wf,"%s_wind.f32",base); FILE*wff=fopen(wf,"wb");
+        if(wff){ int hdr[4]={d,(int)z0,(int)y0,(int)x0}; double geo[3]={cyf,cxf,pitch};
+          fwrite(hdr,sizeof(int),4,wff); fwrite(geo,sizeof(double),3,wff);
+          float*wo=malloc(nn*sizeof(float));
+          for(size_t p=0;p<nn;p++) wo[p]=(v[p]>=athr && !bar[p])? wd[p] : NAN;
+          fwrite(wo,sizeof(float),nn,wff); free(wo); fclose(wff);
+          printf("wrote %s (raw winding field for 3D stacking)\n",wf); } }
 
       // ===== QUALITY METRICS: grade the spiral fit from the dense winding field wd[] =====
       // These measure the things the edge-residual does NOT: skip/under-count (geometry),
