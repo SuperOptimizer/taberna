@@ -534,13 +534,15 @@ int main(int argc,char**argv){
   // (backward-switch -43..-60%, z-coherence ~3x better); OFF in the wide-pitch DELAMINATED regime
   // (pitch>=50) where sheets are sparse and the median rejects real signal (it hurt there).
   // Explicit argv[23] overrides the gate entirely (for testing).
-  // DEFAULT OFF: the neighbour-median robust update FLATTENS the field to ~0 -- in an unfilled
-  // region most neighbours are still at the init value, so the median is 0 and the update rejects
-  // the correct incoming winding as an outlier, blocking propagation. Its apparent backward-switch
-  // "win" was the flat field having no switches (a blind spot of that metric). Needs a redesign
-  // (e.g. robust rejection only after the field has converged) before it can be trusted again.
-  const double robsig=argc>23?atof(argv[23]):0.0;
-  for(int it=0;it<200;it++) for(int color=0;color<2;color++){
+  // TWO-PHASE: phase 1 = standard isotropic-barrier-blocked diffusion FILLS the field; phase 2
+  // (last ROBIT iters, only if robsig>0) = robust leak-rejection on the now-CONVERGED field. The
+  // earlier single-phase robust update flattened to 0 because it rejected the correct winding when
+  // neighbours were still unfilled (median 0). Run AFTER fill, neighbours carry the true local wrap,
+  // so the median consensus is the real winding and Tukey-rejecting outliers removes cross-barrier
+  // LEAKS without collapsing the climb. Verified by the fill-coverage guard (climb must stay high).
+  const double robsig=argc>23?atof(argv[23]):0.6;   // two-phase robust ON by default (verified safe)
+  const int NIT=200, ROBIT=40;
+  for(int it=0;it<NIT;it++){ int robust = (robsig>0 && it>=NIT-ROBIT); for(int color=0;color<2;color++){
     #pragma omp parallel for schedule(static)
     for(int z=0;z<dz;z++)for(int y=0;y<dy;y++)for(int x=0;x<dx;x++){ if(((x+y+z)&1)!=color)continue; size_t p=IDX(z,y,x);
       if(v[p]<athr||bar[p])continue;
@@ -553,7 +555,7 @@ int main(int argc,char**argv){
       if(z>0   &&MAT(p-(size_t)dy*dx)){ nval[nn2]=wd[p-(size_t)dy*dx];nwt[nn2]=1.0;nn2++; }
       if(z<dz-1&&MAT(p+(size_t)dy*dx)){ nval[nn2]=wd[p+(size_t)dy*dx];nwt[nn2]=1.0;nn2++; }
       double s=0,ws=0;
-      if(robsig>0 && nn2>=3){
+      if(robust && nn2>=3){
         double sv[6]; for(int j=0;j<nn2;j++)sv[j]=nval[j];   // median of neighbour values = consensus
         for(int i=1;i<nn2;i++){ double t=sv[i];int j=i-1; while(j>=0&&sv[j]>t){sv[j+1]=sv[j];j--;} sv[j+1]=t; }
         double cons=(nn2&1)?sv[nn2/2]:0.5*(sv[nn2/2-1]+sv[nn2/2]);
@@ -561,7 +563,7 @@ int main(int argc,char**argv){
       } else { for(int j=0;j<nn2;j++){ s+=nwt[j]*nval[j]; ws+=nwt[j]; } }
       if(anc[p]){ double wa=LAM*ws+1e-6; s+=wa*ancw[p]; ws+=wa; }
       if(ws>1e-9){ double tgt=s/ws; wd[p]=(f32)(wd[p]+omega*(tgt-wd[p])); } }
-  }
+  } }
   #undef MAT
   #undef INPW
   #undef TANW
