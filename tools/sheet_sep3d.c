@@ -487,18 +487,35 @@ int main(int argc,char**argv){
   // down-weight (radw) still discourages leaking through barrier GAPS without starving the fill.
   const double omega=1.6, LAM=(argc>12?atof(argv[12]):0.6), radw=(argc>17?atof(argv[17]):1.0);
   #define INPW(comp) (1.0 - (1.0-radw)*(comp)*(comp))   // 1 tangential, radw radial
+  // ROBUST dense update (adapted from VC3D GrowSurface robust_affine / drop-worst-neighbour): a
+  // barrier GAP lets a wrong-wrap neighbour (~1 wrap off) leak into the mean -> backward switch.
+  // Take the neighbour MEDIAN as consensus and Tukey-downweight neighbours far from it. Safe:
+  // winding has NO legitimate sharp gradient tangentially or in z (only radially, barrier-blocked),
+  // so a strongly-disagreeing neighbour is a leak, not signal. argv[23]=robustdiff sigma (0=off).
+  // Default: ON (sigma 0.3) in the tight-pitch COMPRESSED CORE where touches/leaks dominate
+  // (backward-switch -43..-60%, z-coherence ~3x better); OFF in the wide-pitch DELAMINATED regime
+  // (pitch>=50) where sheets are sparse and the median rejects real signal (it hurt there).
+  // Explicit argv[23] overrides the gate entirely (for testing).
+  const double robsig=argc>23?atof(argv[23]):(pitch<50?0.3:0.0);
   for(int it=0;it<200;it++) for(int color=0;color<2;color++){
     #pragma omp parallel for schedule(static)
     for(int z=0;z<dz;z++)for(int y=0;y<dy;y++)for(int x=0;x<dx;x++){ if(((x+y+z)&1)!=color)continue; size_t p=IDX(z,y,x);
       if(v[p]<athr||bar[p])continue;
       double ddy=y-cy[z],ddx=x-cx[z],r=sqrt(ddy*ddy+ddx*ddx); double uy=r>1e-6?ddy/r:0,ux=r>1e-6?ddx/r:1;
-      double s=0,ws=0,w;
-      if(x>0   &&MAT(p-1)){ w=INPW(ux); s+=w*wd[p-1];ws+=w; }
-      if(x<dx-1&&MAT(p+1)){ w=INPW(ux); s+=w*wd[p+1];ws+=w; }
-      if(y>0   &&MAT(p-dx)){ w=INPW(uy); s+=w*wd[p-dx];ws+=w; }
-      if(y<dy-1&&MAT(p+dx)){ w=INPW(uy); s+=w*wd[p+dx];ws+=w; }
-      if(z>0   &&MAT(p-(size_t)dy*dx)){ s+=1.0*wd[p-(size_t)dy*dx];ws+=1.0; }   // z-link (genuine 3D)
-      if(z<dz-1&&MAT(p+(size_t)dy*dx)){ s+=1.0*wd[p+(size_t)dy*dx];ws+=1.0; }
+      double nval[6],nwt[6]; int nn2=0;
+      if(x>0   &&MAT(p-1)){ nval[nn2]=wd[p-1];nwt[nn2]=INPW(ux);nn2++; }
+      if(x<dx-1&&MAT(p+1)){ nval[nn2]=wd[p+1];nwt[nn2]=INPW(ux);nn2++; }
+      if(y>0   &&MAT(p-dx)){ nval[nn2]=wd[p-dx];nwt[nn2]=INPW(uy);nn2++; }
+      if(y<dy-1&&MAT(p+dx)){ nval[nn2]=wd[p+dx];nwt[nn2]=INPW(uy);nn2++; }
+      if(z>0   &&MAT(p-(size_t)dy*dx)){ nval[nn2]=wd[p-(size_t)dy*dx];nwt[nn2]=1.0;nn2++; }
+      if(z<dz-1&&MAT(p+(size_t)dy*dx)){ nval[nn2]=wd[p+(size_t)dy*dx];nwt[nn2]=1.0;nn2++; }
+      double s=0,ws=0;
+      if(robsig>0 && nn2>=3){
+        double sv[6]; for(int j=0;j<nn2;j++)sv[j]=nval[j];   // median of neighbour values = consensus
+        for(int i=1;i<nn2;i++){ double t=sv[i];int j=i-1; while(j>=0&&sv[j]>t){sv[j+1]=sv[j];j--;} sv[j+1]=t; }
+        double cons=(nn2&1)?sv[nn2/2]:0.5*(sv[nn2/2-1]+sv[nn2/2]);
+        for(int j=0;j<nn2;j++){ double d=(nval[j]-cons)/robsig, rob=(d*d<1)?(1-d*d)*(1-d*d):0; double w=nwt[j]*rob; s+=w*nval[j]; ws+=w; }
+      } else { for(int j=0;j<nn2;j++){ s+=nwt[j]*nval[j]; ws+=nwt[j]; } }
       if(anc[p]){ double wa=LAM*ws+1e-6; s+=wa*ancw[p]; ws+=wa; }
       if(ws>1e-9){ double tgt=s/ws; wd[p]=(f32)(wd[p]+omega*(tgt-wd[p])); } }
   }
