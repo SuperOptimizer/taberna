@@ -37,6 +37,7 @@
 #include "io/mca.h"
 #include "eval/topo.h"
 #include "annotate/umbilicus.h"
+#include "segmentation/sheet_tensor.h"
 
 typedef unsigned char u8; typedef unsigned int u32; typedef float f32;
 #define IDX(z,y,x) (((size_t)(z)*dy+(y))*dx+(x))
@@ -191,6 +192,19 @@ int main(int argc,char**argv){
   int tier=(int)(0.7*pitch+0.5); if(tier<3)tier=3; if(tier>30)tier=30;
   double vprom=0.35*athr; if(vprom<6)vprom=6; double pitchmin=0.20*pitch;
   fprintf(stderr,"pitch=%.1f walk=%d kmin=%d tie=%d vprom=%.1f\n",pitch,walkr,kmin,tier,vprom);
+
+  // CLASSICAL SURFACE-PROBABILITY FIELD (no ML): structure-tensor sheetness in [0,1], the non-ML
+  // equivalent of VC3D's U-Net surface prediction. VC3D's gradient/TV methods failed on raw CT
+  // because raw intensity has within-sheet texture; the sheetness field is high on sheets, low
+  // between, texture suppressed -> windingDistance etc. should work on IT. argv[24]=usesheet.
+  int usesheet=argc>24?atoi(argv[24]):0; f32*sh=NULL;
+  if(usesheet){ sh=malloc(nn*sizeof(f32)); f32*vf=malloc(nn*sizeof(f32)); for(size_t p=0;p<nn;p++) vf[p]=v[p];
+    st_params sp=st_default_params(); sp.sigma_grad=1.0f; sp.sigma_tensor=(f32)(pitch*0.12); if(sp.sigma_tensor<1)sp.sigma_tensor=1; if(sp.sigma_tensor>3)sp.sigma_tensor=3;
+    st_sheet_detect(vf,dz,dy,dx,&sp,sh,NULL); free(vf);
+    for(size_t p=0;p<nn;p++) if(v[p]<athr) sh[p]=0;   // mask air
+    double smx=0; for(size_t p=0;p<nn;p++) if(sh[p]>smx)smx=sh[p];
+    for(size_t p=0;p<nn;p++) sh[p]=(f32)(sh[p]/(smx>1e-6?smx:1)*255.0);   // scale to ~[0,255] for the valley/peak detectors
+    fprintf(stderr,"sheetness field computed (sigma_tensor=%.1f, scaled to 0..255)\n",sp.sigma_tensor); }
 
   // refine per-z umbilicus from sheet normals (robust line intersection); keeps coarse estimate
   // as init/fallback. Sanity-clamp: reject a refined center that bolts >0.6*dim from coarse.
@@ -447,10 +461,23 @@ int main(int argc,char**argv){
   { int zm2=dz/2; const f32*vsz=vs+(size_t)zm2*dy*dx; double cyz=cy[zm2],cxz=cx[zm2];
     double Rmx=0; for(int y=0;y<dy;y++)for(int x=0;x<dx;x++){ if(v[(size_t)zm2*dy*dx+(size_t)y*dx+x]<athr)continue;
       double rr2=hypot(y-cyz,x-cxz); if(rr2>Rmx)Rmx=rr2; }
-    int NA=72; double cnts[72]; int nc=0;
+    int NA=72; double cnts[72]; int nc=0; double shc[72]; int nsh=0;
+    const f32*shz = sh? sh+(size_t)zm2*dy*dx : NULL;
     for(int a=0;a<NA;a++){ double th=2*M_PI*a/NA,uy=sin(th),ux=cos(th); int Rr=(int)(Rmx+0.5); if(Rr>799)Rr=799;
-      int nv=count_valleys(vsz,dy,dx,cyz,cxz,uy,ux,Rr,vprom,pitchmin,0,tvsm); if(nv>0)cnts[nc++]=nv; }
-    if(nc){ qsort(cnts,nc,sizeof(double),cmp_dbl); fprintf(stderr,"GROUND-TRUTH radial crossings (median over %d rays): %.0f wraps (solved=%.0f)\n",nc,cnts[nc/2],wmax-wmin); } }
+      int nv=count_valleys(vsz,dy,dx,cyz,cxz,uy,ux,Rr,vprom,pitchmin,0,tvsm); if(nv>0)cnts[nc++]=nv;
+      // sheetness crossings: a sheet is a sheetness PEAK -> count valleys of (255-sheetness).
+      // The sheetness field has texture suppressed, so this is the clean windingDistance signal.
+      if(shz){ int np2=Rr<799?Rr:799; double prof[800]; for(int t=0;t<=np2;t++){ int iy=(int)lround(cyz+uy*t),ix=(int)lround(cxz+ux*t);
+          prof[t]=(iy<0||iy>=dy||ix<0||ix>=dx)?0.0:255.0-(double)shz[(size_t)iy*dx+ix]; }
+        // inline prominence valley-count on the inverted sheetness (prom ~ 0.25*255)
+        double prom=60,pk=1.8*prom,cmax=-1e30,cmin=1e30; int dir=0,nv2=0,st=0;
+        for(int t=0;t<=np2;t++){ double val=prof[t]; if(!st){cmax=cmin=val;st=1;continue;}
+          if(dir>=0){ if(val>cmax)cmax=val; if(cmax-val>=pk){dir=-1;cmin=val;} }
+          if(dir<=0){ if(val<cmin)cmin=val; if(val-cmin>=prom){ if(dir==-1)nv2++; dir=1;cmax=val; } } }
+        if(nv2>0)shc[nsh++]=nv2; } }
+    if(nc){ qsort(cnts,nc,sizeof(double),cmp_dbl); double shm=0; if(nsh){qsort(shc,nsh,sizeof(double),cmp_dbl);shm=shc[nsh/2];}
+      if(shz) fprintf(stderr,"GROUND-TRUTH radial crossings (median/%d rays): raw-valley=%.0f, SHEETNESS=%.0f, solved=%.0f\n",nc,cnts[nc/2],shm,wmax-wmin);
+      else    fprintf(stderr,"GROUND-TRUTH radial crossings (median/%d rays): raw-valley=%.0f, solved=%.0f\n",nc,cnts[nc/2],wmax-wmin); } }
   // does NODE winding climb with NODE radius? (isolates graph vs dense). bin by mean radius.
   { int NB=12; double bsum[12]={0};long bc[12]={0}; double Rmax=0;
     for(int i=0;i<K;i++) if(meanr[i]>Rmax)Rmax=meanr[i]; for(int i=0;i<RK;i++) if(rmeanr[i]>Rmax)Rmax=rmeanr[i];

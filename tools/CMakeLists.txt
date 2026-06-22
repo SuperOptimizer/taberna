@@ -156,7 +156,7 @@ if(OpenMP_C_FOUND)
 endif()
 
 add_executable(sheet_sep3d sheet_sep3d.c)
-target_link_libraries(sheet_sep3d PRIVATE taberna_io taberna_eval taberna_annotate)
+target_link_libraries(sheet_sep3d PRIVATE taberna_io taberna_eval taberna_annotate taberna_segmentation)
 if(OpenMP_C_FOUND)
   target_link_libraries(sheet_sep3d PRIVATE OpenMP::OpenMP_C)
 endif()
