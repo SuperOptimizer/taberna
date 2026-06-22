@@ -102,6 +102,7 @@ int main(int argc,char**argv){
   long z0=atol(argv[4]),y0=atol(argv[5]),x0=atol(argv[6]);
   int dz=atoi(argv[7]),dy=atoi(argv[8]),dx=atoi(argv[9]);
   int minseg=argc>10?atoi(argv[10]):40; double pitch_arg=argc>11?atof(argv[11]):0;
+  int use_recto=argc>15?atoi(argv[15]):1;   // recto (delamination rims) is sparse/flat in compressed cores; 0 = ridge-only
   g_tl=tnow();
   mca_handle*arc=mca_open(path); if(!arc){fprintf(stderr,"open fail\n");return 1;}
   int fz,fy,fx,nl; float ql; mca_handle_dims(arc,&fz,&fy,&fx,&ql,&nl);
@@ -157,6 +158,7 @@ int main(int argc,char**argv){
     if(c<in&&c<ou&&c<=in2&&c<=ou2) bar[p]=1;              // strict local min
     for(int k=1;k<=3;k++){ int ry=(int)lround(y+uy*k),rx=(int)lround(x+ux*k);
       if(ry>=0&&ry<dy&&rx>=0&&rx<dx&&v[IDX(z,ry,rx)]<athr){ recto[p]=1; break; } } }
+  if(!use_recto) memset(recto,0,nn);   // ridge-only mode: drop the unreliable recto graph
   PHASE("3D detect");
 
   // PER-SLICE 2D labeling (NOT 3D): 3D connected components percolate across touching wraps
@@ -209,16 +211,35 @@ int main(int argc,char**argv){
       double uy=ddy/r,ux=ddx/r; const f32*vsz=vs+(size_t)z*dy*dx; int prevL=La; \
       for(int k=2;k<walkr;k++){ int ny=(int)lround(y+uy*k),nx=(int)lround(x+ux*k); if(ny<0||ny>=dy||nx<0||nx>=dx)break; size_t q=IDX(z,ny,nx); \
         if((MARK)[q]){ int Lb=(CID)[(LBL)[q]]; if(Lb>=0&&Lb!=prevL&&k>=kmin){ int nv=count_valleys(vsz,dy,dx,y,x,uy,ux,k,vprom,pitchmin); if(nv>15)nv=15; \
-          if(nv==0){ PUSH(raw0,nr0,cap0,(long)((BASE)+La)*NT+(BASE)+Lb); prevL=Lb; continue; } \
+          if(nv==0){ prevL=Lb; continue; }   /* same-wrap fragment: walk THROUGH (no tie -- ties at touches are unreliable) */ \
           PUSH(raw1,nr1,cap1,(((long)((BASE)+La)*NT+(BASE)+Lb)<<4)|nv); break; } } } }
   RADWALK(recto,sl,cid,0);
   RADWALK(ridge,rl,rcid,K);
   #undef RADWALK
-  // same-wrap ties: ridge -> first recto outward (step 0)
+  // same-wrap ties: ridge centerline -> recto rim of the SAME sheet, a SHORT outward walk
+  // (the recto edge is only ~half a sheet thickness out of the centerline). tier over-reaches
+  // to the NEXT wrap's recto and flattens; cap at ~0.3*pitch so the tie is same-sheet-reliable.
+  int rrtie=(int)(0.3*pitch); if(rrtie<2)rrtie=2; if(rrtie>6)rrtie=6; (void)tier;
   for(int z=0;z<dz;z++)for(int y=0;y<dy;y++)for(int x=0;x<dx;x++){ size_t p=IDX(z,y,x); if(!ridge[p])continue;
     int Ld=rcid[rl[p]]; if(Ld<0)continue; double ddy=y-cy[z],ddx=x-cx[z],r=sqrt(ddy*ddy+ddx*ddx); if(r<1)continue; double uy=ddy/r,ux=ddx/r;
-    for(int k=1;k<=tier;k++){ int oy=(int)lround(y+uy*k),ox=(int)lround(x+ux*k); if(oy<0||oy>=dy||ox<0||ox>=dx)break; size_t q=IDX(z,oy,ox);
+    for(int k=1;k<=rrtie;k++){ int oy=(int)lround(y+uy*k),ox=(int)lround(x+ux*k); if(oy<0||oy>=dy||ox<0||ox>=dx)break; size_t q=IDX(z,oy,ox);
       if(recto[q]){ int Lr=cid[sl[q]]; if(Lr>=0) PUSH(raw0,nr0,cap0,(long)(K+Ld)*NT+Lr); break; } } }
+  // TANGENTIAL ties: connect ridge fragments along the TANGENT (perp to radial) = same wrap,
+  // same radius, adjacent angle. These join the angular islands into per-wrap rings so the
+  // graph is ONE connected component (else each radial chain floats with its own offset ->
+  // huge winding spread at fixed radius). Tangential motion stays on the same wrap (wraps are
+  // radially separated), so unlike radial/z ties they CANNOT bridge different wraps.
+  int rtang=(int)(0.5*pitch); if(rtang<3)rtang=3; if(rtang>14)rtang=14;
+  #define TANGTIE(MARK,LBL,CID,BASE) \
+    for(int z=0;z<dz;z++)for(int y=0;y<dy;y++)for(int x=0;x<dx;x++){ size_t p=IDX(z,y,x); if(!(MARK)[p])continue; \
+      int La=(CID)[(LBL)[p]]; if(La<0)continue; double ddy=y-cy[z],ddx=x-cx[z],r=sqrt(ddy*ddy+ddx*ddx); if(r<1)continue; \
+      double ty=-ddx/r,tx=ddy/r; \
+      for(int sgn=-1;sgn<=1;sgn+=2)for(int k=1;k<=rtang;k++){ int ny=(int)lround(y+ty*sgn*k),nx=(int)lround(x+tx*sgn*k); \
+        if(ny<0||ny>=dy||nx<0||nx>=dx)break; size_t q=IDX(z,ny,nx); \
+        if((MARK)[q]){ int Lb=(CID)[(LBL)[q]]; if(Lb>=0&&Lb!=La){ PUSH(raw0,nr0,cap0,(long)((BASE)+La)*NT+(BASE)+Lb); } break; } } }
+  TANGTIE(ridge,rl,rcid,K);
+  if(use_recto) TANGTIE(recto,sl,cid,0);
+  #undef TANGTIE
   // Z-TIE edges (THE 3D link): a per-slice node and the spatially-OVERLAPPING node in the
   // next slice are the same wrap -> step-0 tie. This propagates one global winding through
   // z WITHOUT 3D connectivity percolating across touching wraps. Overlap = shared (y,x).
@@ -267,6 +288,16 @@ int main(int argc,char**argv){
   for(size_t p=0;p<nn;p++){ int idx=-1; u32 Lr=sl[p],Ld=rl[p];
     if(Lr&&cid[Lr]>=0) idx=cid[Lr]; else if(Ld&&rcid[Ld]>=0) idx=K+rcid[Ld];
     if(idx>=0){ wd[p]=(f32)wind[idx]; ancw[p]=(f32)wind[idx]; anc[p]=1; } }
+  // DIAGNOSTIC: dump the raw NODE winding at mid-z (anchors only, BEFORE dense) -- isolates
+  // graph quality from dense-propagation quality.
+  { int zmm=dz/2; size_t zbb=(size_t)zmm*dy*dx; u8*rg=malloc((size_t)dy*dx*3);
+    double lo=wmin,hi=wmax,spn=(hi>lo)?hi-lo:1;
+    for(int y=0;y<dy;y++)for(int x=0;x<dx;x++){ size_t p=zbb+(size_t)y*dx+x,o=((size_t)y*dx+x)*3; int g=v[p]/6; rg[o]=rg[o+1]=rg[o+2]=(u8)g;
+      if(!anc[p])continue; double t=(wd[p]-lo)/spn; if(t<0)t=0;if(t>1)t=1; double ss=t*4;int sg=(int)ss;double fr=ss-sg;u8 R,G,B;
+      switch(sg){case 0:R=0;G=(u8)(255*fr);B=255;break;case 1:R=0;G=255;B=(u8)(255*(1-fr));break;case 2:R=(u8)(255*fr);G=255;B=0;break;case 3:R=255;G=(u8)(255*(1-fr));B=0;break;default:R=255;G=0;B=0;}
+      rg[o]=R;rg[o+1]=G;rg[o+2]=B; }
+    char fn[700]; snprintf(fn,sizeof fn,"%s_nodes.ppm",base); FILE*f=fopen(fn,"wb");
+    if(f){ fprintf(f,"P6\n%d %d\n255\n",dx,dy); fwrite(rg,1,(size_t)dy*dx*3,f); fclose(f);} free(rg); fprintf(stderr,"wrote %s_nodes.ppm (graph node winding, mid-z)\n",base); }
   #define MAT(q) (v[q]>=athr && !bar[q])
   // in-plane coupling is HARD radial-blocked: weight = (1-(e.radial)^2)^4 so a radially-
   // aligned neighbour gets ~0 (winding must NOT diffuse across wraps). A small floor would
