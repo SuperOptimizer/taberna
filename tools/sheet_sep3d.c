@@ -167,6 +167,20 @@ int main(int argc,char**argv){
     for(int k=1;k<=3;k++){ int ry=(int)lround(y+uy*k),rx=(int)lround(x+ux*k);
       if(ry>=0&&ry<dy&&rx>=0&&rx<dx&&v[IDX(z,ry,rx)]<athr){ recto[p]=1; break; } } }
   if(!use_recto) memset(recto,0,nn);   // ridge-only mode: drop the unreliable recto graph
+  // BARRIER COMPLETION: the dense fill leaks across tightly-packed wraps wherever the
+  // inter-sheet wall (bar) has a gap. Per-slice in-plane morphological CLOSE (dilate r,
+  // erode r) seals tangential gaps in the walls without net thickening, so isotropic
+  // diffusion is actually stopped between wraps. argv[18] radius (0=off).
+  int barclose=argc>18?atoi(argv[18]):1;
+  if(barclose>0){ u8*tb=malloc((size_t)dy*dx);
+    for(int z=0;z<dz;z++){ u8*bz=bar+(size_t)z*dy*dx;
+      for(int it=0;it<barclose;it++){ memcpy(tb,bz,(size_t)dy*dx);
+        for(int y=0;y<dy;y++)for(int x=0;x<dx;x++){ size_t q=(size_t)y*dx+x; if(tb[q]||v[IDX(z,y,x)]<athr)continue;
+          if((x>0&&tb[q-1])||(x<dx-1&&tb[q+1])||(y>0&&tb[q-dx])||(y<dy-1&&tb[q+dx])) bz[q]=1; } }
+      for(int it=0;it<barclose;it++){ memcpy(tb,bz,(size_t)dy*dx);
+        for(int y=0;y<dy;y++)for(int x=0;x<dx;x++){ size_t q=(size_t)y*dx+x; if(!tb[q])continue;
+          if((x>0&&!tb[q-1])||(x<dx-1&&!tb[q+1])||(y>0&&!tb[q-dx])||(y<dy-1&&!tb[q+dx])) bz[q]=0; } } }
+    free(tb); }
   PHASE("3D detect");
 
   // PER-SLICE 2D labeling (NOT 3D): 3D connected components percolate across touching wraps
