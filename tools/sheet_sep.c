@@ -27,6 +27,90 @@
 #include "annotate/umbilicus.h"
 
 static double tnow(void){ struct timespec ts; clock_gettime(CLOCK_MONOTONIC,&ts); return ts.tv_sec+ts.tv_nsec*1e-9; }
+// separable box smooth (radius r) of a float field, in place via a scratch buffer.
+static void box2d(float *f, float *tmp, int d, int r){
+  #pragma omp parallel for schedule(static)
+  for(int y=0;y<d;y++){ for(int x=0;x<d;x++){ double s=0;int c=0;
+    for(int k=-r;k<=r;k++){ int xx=x+k; if(xx>=0&&xx<d){s+=f[(size_t)y*d+xx];c++;} } tmp[(size_t)y*d+x]=(float)(s/c); } }
+  #pragma omp parallel for schedule(static)
+  for(int y=0;y<d;y++){ for(int x=0;x<d;x++){ double s=0;int c=0;
+    for(int k=-r;k<=r;k++){ int yy=y+k; if(yy>=0&&yy<d){s+=tmp[(size_t)yy*d+x];c++;} } f[(size_t)y*d+x]=(float)(s/c); } }
+}
+
+// ACROSS-WRAP DIRECTION field: the unit direction pointing from one wrap to the NEXT,
+// used by ridge/valley/recto detection and the graph walk INSTEAD of the global radius.
+// NULL g_dirx => fall back to radial. Two non-radial modes let the tracing follow the
+// real DEFORMED sheets (flat tops, bulges, concavities) the radius rounds toward a circle.
+static float *g_dirx=NULL,*g_diry=NULL;
+#define WDIRV(P,Y,X) double dy=(double)(Y)-cyf,dx=(double)(X)-cxf,r=sqrt(dy*dy+dx*dx),uy,ux; \
+  if(g_dirx&&(g_dirx[P]!=0.0f||g_diry[P]!=0.0f)){ ux=g_dirx[P]; uy=g_diry[P]; } \
+  else { double rr=(r<1e-6)?1e-6:r; uy=dy/rr; ux=dx/rr; }
+
+// MODE "normal": local sheet normal = dominant eigenvector of the smoothed gradient
+// structure tensor, oriented OUTWARD (away from the umbilicus). Follows local deformation.
+static void dir_normal(const float*vs,const u8*v,int athr,int d,double cyf,double cxf,float*dx,float*dy){
+  size_t nn=(size_t)d*d;
+  float *Jxx=calloc(nn,sizeof(float)),*Jyy=calloc(nn,sizeof(float)),*Jxy=calloc(nn,sizeof(float)),*tmp=malloc(nn*sizeof(float));
+  #pragma omp parallel for schedule(static)
+  for(int y=1;y<d-1;y++)for(int x=1;x<d-1;x++){ size_t p=(size_t)y*d+x; if(v[p]<athr)continue;
+    float gx=0.5f*(vs[p+1]-vs[p-1]),gy=0.5f*(vs[p+d]-vs[p-d]); Jxx[p]=gx*gx;Jyy[p]=gy*gy;Jxy[p]=gx*gy; }
+  box2d(Jxx,tmp,d,3); box2d(Jyy,tmp,d,3); box2d(Jxy,tmp,d,3);
+  #pragma omp parallel for schedule(static)
+  for(int y=0;y<d;y++)for(int x=0;x<d;x++){ size_t p=(size_t)y*d+x; if(v[p]<athr){dx[p]=dy[p]=0;continue;}
+    double a=Jxx[p],b=Jxy[p],c=Jyy[p],tr=a+c,det=a*c-b*b,disc=sqrt(fmax(0,tr*tr/4-det)),l1=tr/2+disc;
+    double ex=b,ey=l1-a,nm=hypot(ex,ey); if(nm<1e-9){ex=1;ey=0;nm=1;} ex/=nm;ey/=nm;
+    double rx=x-cxf,ry=y-cyf; if(ex*rx+ey*ry<0){ex=-ex;ey=-ey;}   // orient outward
+    dx[p]=(float)ex; dy[p]=(float)ey; }
+  free(Jxx);free(Jyy);free(Jxy);free(tmp);
+}
+// MODE "envelope": warp the radius by the per-angle outer envelope R(theta) (the egg
+// shape), then the across-wrap direction = normalized gradient of the warped radius.
+static void dir_envelope(const u8*v,int athr,int d,double cyf,double cxf,float*dx,float*dy){
+  size_t nn=(size_t)d*d; int NB=360;
+  double *R=calloc(NB,sizeof(double));
+  for(int y=0;y<d;y++)for(int x=0;x<d;x++){ if(v[(size_t)y*d+x]<athr)continue;
+    double ry=y-cyf,rx=x-cxf,r=sqrt(rx*rx+ry*ry),th=atan2(ry,rx); int b=(int)((th+M_PI)/(2*M_PI)*NB); b=((b%NB)+NB)%NB;
+    if(r>R[b])R[b]=r; }
+  double *Rs=calloc(NB,sizeof(double)); for(int b=0;b<NB;b++){ double s=0;int c=0;
+    for(int k=-8;k<=8;k++){int bb=((b+k)%NB+NB)%NB; if(R[bb]>0){s+=R[bb];c++;}} Rs[b]=c?s/c:R[b]; }
+  double Rref=0;int cc=0; for(int b=0;b<NB;b++) if(Rs[b]>0){Rref+=Rs[b];cc++;} Rref=cc?Rref/cc:1;
+  float *rw=malloc(nn*sizeof(float));
+  for(int y=0;y<d;y++)for(int x=0;x<d;x++){ size_t p=(size_t)y*d+x; double ry=y-cyf,rx=x-cxf,r=sqrt(rx*rx+ry*ry),th=atan2(ry,rx);
+    int b=(int)((th+M_PI)/(2*M_PI)*NB); b=((b%NB)+NB)%NB; double Rb=Rs[b]>1?Rs[b]:1; rw[p]=(float)(r*Rref/Rb); }
+  #pragma omp parallel for schedule(static)
+  for(int y=0;y<d;y++)for(int x=0;x<d;x++){ size_t p=(size_t)y*d+x; if(v[p]<athr){dx[p]=dy[p]=0;continue;}
+    float gx=(x>0&&x<d-1)?0.5f*(rw[p+1]-rw[p-1]):0, gy=(y>0&&y<d-1)?0.5f*(rw[p+d]-rw[p-d]):0;
+    double nm=hypot(gx,gy);
+    if(nm<1e-6){ double rx=x-cxf,ry=y-cyf,r=hypot(rx,ry); if(r<1){dx[p]=dy[p]=0;} else {dx[p]=(float)(rx/r);dy[p]=(float)(ry/r);} }
+    else { dx[p]=(float)(gx/nm); dy[p]=(float)(gy/nm); } }
+  free(R);free(Rs);free(rw);
+}
+// MODE "hybrid": envelope (robust global egg) refined by the local normal where the
+// structure tensor is COHERENT (clear sheet). dir = normalize((1-w)*env + w*normal),
+// w = 0.6*coherence -- noisy regions stay on the envelope, clear regions get the local
+// wiggle. The blended field is box-smoothed + renormalized to suppress residual jitter.
+static void dir_hybrid(const float*vs,const u8*v,int athr,int d,double cyf,double cxf,float*dx,float*dy){
+  size_t nn=(size_t)d*d;
+  float *ex=calloc(nn,sizeof(float)),*ey=calloc(nn,sizeof(float));
+  dir_envelope(v,athr,d,cyf,cxf,ex,ey);                       // global egg base
+  float *Jxx=calloc(nn,sizeof(float)),*Jyy=calloc(nn,sizeof(float)),*Jxy=calloc(nn,sizeof(float)),*tmp=malloc(nn*sizeof(float));
+  #pragma omp parallel for schedule(static)
+  for(int y=1;y<d-1;y++)for(int x=1;x<d-1;x++){ size_t p=(size_t)y*d+x; if(v[p]<athr)continue;
+    float gx=0.5f*(vs[p+1]-vs[p-1]),gy=0.5f*(vs[p+d]-vs[p-d]); Jxx[p]=gx*gx;Jyy[p]=gy*gy;Jxy[p]=gx*gy; }
+  box2d(Jxx,tmp,d,3); box2d(Jyy,tmp,d,3); box2d(Jxy,tmp,d,3);
+  #pragma omp parallel for schedule(static)
+  for(int y=0;y<d;y++)for(int x=0;x<d;x++){ size_t p=(size_t)y*d+x; if(v[p]<athr){dx[p]=dy[p]=0;continue;}
+    double a=Jxx[p],b=Jxy[p],c=Jyy[p],tr=a+c,det=a*c-b*b,disc=sqrt(fmax(0,tr*tr/4-det)),l1=tr/2+disc,l0=tr/2-disc;
+    double nx=b,ny=l1-a,nm=hypot(nx,ny); if(nm<1e-9){nx=ex[p];ny=ey[p];nm=hypot(nx,ny);if(nm<1e-9){nm=1;}} nx/=nm;ny/=nm;
+    if(nx*ex[p]+ny*ey[p]<0){nx=-nx;ny=-ny;}                    // orient normal to the envelope
+    double coh=(l1+l0>1e-9)?(l1-l0)/(l1+l0):0.0, w=0.6*coh;
+    double bx=(1-w)*ex[p]+w*nx, by=(1-w)*ey[p]+w*ny, bn=hypot(bx,by); if(bn<1e-9){bx=ex[p];by=ey[p];bn=hypot(bx,by);if(bn<1e-9)bn=1;}
+    dx[p]=(float)(bx/bn); dy[p]=(float)(by/bn); }
+  box2d(dx,tmp,d,2); box2d(dy,tmp,d,2);                       // smooth the blended direction
+  #pragma omp parallel for schedule(static)
+  for(size_t p=0;p<nn;p++){ if(v[p]<athr){dx[p]=dy[p]=0;continue;} double n=hypot(dx[p],dy[p]); if(n>1e-9){dx[p]/=n;dy[p]/=n;} }
+  free(ex);free(ey);free(Jxx);free(Jyy);free(Jxy);free(tmp);
+}
 static double g_tl;
 #define PHASE(name) do{ fprintf(stderr,"[t] %-18s %.2fs\n",name,tnow()-g_tl); g_tl=tnow(); }while(0)
 
@@ -101,7 +185,7 @@ static double *graph_winding(const u8 *marker, const u32 *lbl, const int *cid, i
   // and keep walking. Beyond wmax would be a 2-ring SKIP; the loop ends there.
   for(int y=0;y<d;y++)for(int x=0;x<d;x++){ size_t p=(size_t)y*d+x; if(!marker[p])continue;
     int La=cid[lbl[p]]; if(La<0)continue;
-    double dy=y-cyf,dx=x-cxf,r=sqrt(dy*dy+dx*dx); if(r<1)continue; double uy=dy/r,ux=dx/r;
+    WDIRV(p,y,x); if(r<1)continue;
     for(int k=2;k<wmax;k++){ int ny_=(int)lround(y+uy*k),nx_=(int)lround(x+ux*k);
       if(ny_<0||ny_>=d||nx_<0||nx_>=d)break; size_t q=(size_t)ny_*d+nx_;
       if(marker[q]){ int Lb=cid[lbl[q]]; if(Lb>=0&&Lb!=La&&k>=kmin){ edge[(size_t)La*K+Lb]++; break; } } } }
@@ -166,8 +250,7 @@ static double *unified_winding(const u8*recto,const u32*rsl,const int*rcid,int K
   #define PUSH0(key) do{ if(nr0>=cap0){cap0*=2;raw0=realloc(raw0,cap0*sizeof(long));} raw0[nr0++]=(key); }while(0)
   #define RADWALK(MARK,LBL,CID,BASE) \
     for(int y=0;y<d;y++)for(int x=0;x<d;x++){ size_t p=(size_t)y*d+x; if(!(MARK)[p])continue; \
-      int La=(CID)[(LBL)[p]]; if(La<0)continue; double dy=y-cyf,dx=x-cxf,r=sqrt(dy*dy+dx*dx); \
-      if(r<1)continue; double uy=dy/r,ux=dx/r; \
+      int La=(CID)[(LBL)[p]]; if(La<0)continue; WDIRV(p,y,x); if(r<1)continue; \
       for(int k=2;k<wmax;k++){ int ny_=(int)lround(y+uy*k),nx_=(int)lround(x+ux*k); \
         if(ny_<0||ny_>=d||nx_<0||nx_>=d)break; size_t q=(size_t)ny_*d+nx_; \
         if((MARK)[q]){ int Lb=(CID)[(LBL)[q]]; if(Lb>=0&&Lb!=La&&k>=kmin){ PUSH1((long)((BASE)+La)*K+(BASE)+Lb); break; } } } }
@@ -176,8 +259,7 @@ static double *unified_winding(const u8*recto,const u32*rsl,const int*rcid,int K
   #undef RADWALK
   // same-wrap ties: from each ridge voxel walk OUTWARD; first recto hit = same wrap.
   for(int y=0;y<d;y++)for(int x=0;x<d;x++){ size_t p=(size_t)y*d+x; if(!ridge[p])continue;
-    int Ld=rdcid[rdl[p]]; if(Ld<0)continue; double dy=y-cyf,dx=x-cxf,r=sqrt(dy*dy+dx*dx);
-    if(r<1)continue; double uy=dy/r,ux=dx/r;
+    int Ld=rdcid[rdl[p]]; if(Ld<0)continue; WDIRV(p,y,x); if(r<1)continue;
     for(int k=1;k<=tiemax;k++){ int oy=(int)lround(y+uy*k),ox=(int)lround(x+ux*k);
       if(oy<0||oy>=d||ox<0||ox>=d)break; size_t q=(size_t)oy*d+ox;
       if(recto[q]){ int Lr=rcid[rsl[q]]; if(Lr>=0){ PUSH0((long)(Kr+Ld)*K+Lr); } break; } } }
@@ -209,6 +291,9 @@ int main(int argc,char**argv){
   const char*path=argv[1],*base=argv[2]; int lod=atoi(argv[3]);
   long z0=atol(argv[4]),y0=atol(argv[5]),x0=atol(argv[6]); int d=atoi(argv[7]);
   int minseg=argc>8?atoi(argv[8]):15;
+  const char*dirmode=argc>9?argv[9]:"envelope"; // radial | normal | envelope | hybrid (across-wrap direction)
+                                                 // envelope wins on real data: global egg shape is robust,
+                                                 // local structure-tensor normals too noisy at these LODs.
   mca_handle*arc=mca_open(path); if(!arc){fprintf(stderr,"open fail\n");return 1;}
   int fz,fy,fx,nl; float ql; mca_handle_dims(arc,&fz,&fy,&fx,&ql,&nl);
 
@@ -241,11 +326,26 @@ int main(int argc,char**argv){
   int athr=air_threshold(v,nn);              // bimodal air/material split (was v==0)
   fprintf(stderr,"bimodal air threshold: v<%d = air, v>=%d = material\n",athr,athr);
 
+  // smoothed intensity (air->0), used by ridge/valley detection + the normal direction.
+  f32 *vs=malloc(nn*sizeof(f32)); for(size_t p=0;p<nn;p++) vs[p]=v[p];
+  { f32*t=malloc(nn*sizeof(f32)); for(int it=0;it<2;it++){
+      for(int y=0;y<d;y++)for(int x=0;x<d;x++){ size_t p=(size_t)y*d+x; double s=vs[p];int c=1;
+        if(x>0){s+=vs[p-1];c++;}if(x<d-1){s+=vs[p+1];c++;}if(y>0){s+=vs[p-d];c++;}if(y<d-1){s+=vs[p+d];c++;}
+        t[p]=(f32)(s/c);} memcpy(vs,t,nn*sizeof(f32)); } free(t); }
+  for(size_t p=0;p<nn;p++) if(v[p]<athr) vs[p]=0;
+
+  // ACROSS-WRAP DIRECTION (radial | normal | envelope) -- lets detection + the graph
+  // walk follow the real deformed sheets instead of the global radius.
+  if(strcmp(dirmode,"normal")==0){ g_dirx=calloc(nn,sizeof(float)); g_diry=calloc(nn,sizeof(float)); dir_normal(vs,v,athr,d,cyf,cxf,g_dirx,g_diry); }
+  else if(strcmp(dirmode,"envelope")==0){ g_dirx=calloc(nn,sizeof(float)); g_diry=calloc(nn,sizeof(float)); dir_envelope(v,athr,d,cyf,cxf,g_dirx,g_diry); }
+  else if(strcmp(dirmode,"hybrid")==0){ g_dirx=calloc(nn,sizeof(float)); g_diry=calloc(nn,sizeof(float)); dir_hybrid(vs,v,athr,d,cyf,cxf,g_dirx,g_diry); }
+  fprintf(stderr,"across-wrap direction mode: %s\n",dirmode);
+
   // (1) recto faces: material with air OUTWARD along the radius
   u8*recto=calloc(nn,1);
   #pragma omp parallel for schedule(static)
   for(int y=0;y<d;y++)for(int x=0;x<d;x++){ size_t p=(size_t)y*d+x; if(v[p]<athr)continue;
-    double dy=y-cyf,dx=x-cxf,r=sqrt(dy*dy+dx*dx); if(r<1)continue; double uy=dy/r,ux=dx/r;
+    WDIRV(p,y,x); if(r<1)continue;
     for(int k=1;k<=3;k++){ int oy=(int)lround(y+uy*k),ox=(int)lround(x+ux*k);
       if(oy>=0&&oy<d&&ox>=0&&ox<d&&v[(size_t)oy*d+ox]<athr){ recto[p]=1; break; } } }
 
@@ -293,13 +393,6 @@ int main(int argc,char**argv){
   // channel runs along a sheet boundary; extend it from its endpoints by FOLLOWING the
   // intensity valley (the faint inter-sheet minimum) until it bridges to another void.
   // Only commit cuts that reach another void (validated bridges, not arbitrary).
-  f32 *vs=malloc(nn*sizeof(f32));                 // lightly smoothed intensity (air=0)
-  for(size_t p=0;p<nn;p++) vs[p]=v[p];
-  for(int it=0;it<2;it++){ f32*t=malloc(nn*sizeof(f32));
-    for(int y=0;y<d;y++)for(int x=0;x<d;x++){ size_t p=(size_t)y*d+x; double s=vs[p];int c=1;
-      if(x>0){s+=vs[p-1];c++;}if(x<d-1){s+=vs[p+1];c++;}if(y>0){s+=vs[p-d];c++;}if(y<d-1){s+=vs[p+d];c++;}
-      t[p]=(f32)(s/c);} memcpy(vs,t,nn*sizeof(f32)); free(t);}
-  for(size_t p=0;p<nn;p++) if(v[p]<athr) vs[p]=0;
   u8*air=malloc(nn); for(size_t p=0;p<nn;p++) air[p]=v[p]<athr;
   u32*al=calloc(nn,sizeof(u32)); u32 nch=cc_label(air,1,d,d,TOPO_CONN6,al);
   // per-channel moments for PCA
@@ -355,7 +448,7 @@ int main(int argc,char**argv){
   // now covering the air-free blocks too.
   u8*ridge=calloc(nn,1);
   for(int y=0;y<d;y++)for(int x=0;x<d;x++){ size_t p=(size_t)y*d+x; if(v[p]<athr)continue;
-    double dy=y-cyf,dx=x-cxf,r=sqrt(dy*dy+dx*dx); if(r<2)continue; double uy=dy/r,ux=dx/r;
+    WDIRV(p,y,x); if(r<2)continue;
     int iy=(int)lround(y-uy),ix=(int)lround(x-ux), oy=(int)lround(y+uy),ox=(int)lround(x+ux);
     if(iy<0||iy>=d||ix<0||ix>=d||oy<0||oy>=d||ox<0||ox>=d)continue;
     f32 c=vs[p],in=vs[(size_t)iy*d+ix],ou=vs[(size_t)oy*d+ox];
@@ -432,7 +525,7 @@ int main(int argc,char**argv){
       u8 *bar=calloc(nn,1);
       #pragma omp parallel for schedule(static)
       for(int y=0;y<d;y++)for(int x=0;x<d;x++){ size_t p=(size_t)y*d+x; if(v[p]<athr)continue;
-        double dy=y-cyf,dx=x-cxf,r=sqrt(dy*dy+dx*dx); if(r<2)continue; double uy=dy/r,ux=dx/r;
+        WDIRV(p,y,x); if(r<2)continue;
         int iy=(int)lround(y-uy*2),ix=(int)lround(x-ux*2), oy=(int)lround(y+uy*2),ox=(int)lround(x+ux*2);
         if(iy<0||iy>=d||ix<0||ix>=d||oy<0||oy>=d||ox<0||ox>=d)continue;
         float c=vs[p],in=vs[(size_t)iy*d+ix],ou=vs[(size_t)oy*d+ox];
@@ -444,22 +537,39 @@ int main(int argc,char**argv){
       for(size_t p=0;p<nn;p++){ int idx=-1; u32 Lr=sl[p],Ld=rl[p];
         if(Lr&&cid[Lr]>=0) idx=cid[Lr]; else if(Ld&&rcid[Ld]>=0) idx=K+rcid[Ld];
         if(idx>=0){ wd[p]=(float)uw[idx]; anc[p]=1; } }
+      // SHEET-NORMAL field (2D structure tensor): make the propagation follow the LOCAL
+      // deformed sheet instead of the global radius. n = dominant eigenvector of the
+      // smoothed gradient tensor (points ACROSS the sheet). Diffusing ALONG the tangent
+      // (perp to n) and NOT across n preserves the real wrap shape (flat tops, bulges,
+      // concavities) that isotropic diffusion rounds toward a circle.
+      float *nrx=calloc(nn,sizeof(float)),*nry=calloc(nn,sizeof(float));
+      { float *Jxx=calloc(nn,sizeof(float)),*Jyy=calloc(nn,sizeof(float)),*Jxy=calloc(nn,sizeof(float)),*tmp=malloc(nn*sizeof(float));
+        #pragma omp parallel for schedule(static)
+        for(int y=1;y<d-1;y++)for(int x=1;x<d-1;x++){ size_t p=(size_t)y*d+x; if(v[p]<athr)continue;
+          float gx=0.5f*(vs[p+1]-vs[p-1]), gy=0.5f*(vs[p+d]-vs[p-d]); Jxx[p]=gx*gx;Jyy[p]=gy*gy;Jxy[p]=gx*gy; }
+        box2d(Jxx,tmp,d,3); box2d(Jyy,tmp,d,3); box2d(Jxy,tmp,d,3);   // integration scale ~3 vox
+        #pragma omp parallel for schedule(static)
+        for(size_t p=0;p<nn;p++){ if(v[p]<athr)continue;
+          double a=Jxx[p],b=Jxy[p],c=Jyy[p], tr=a+c, det=a*c-b*b, disc=sqrt(fmax(0,tr*tr/4-det)), l1=tr/2+disc;
+          double ex=b, ey=l1-a, nn2=hypot(ex,ey); if(nn2<1e-9){ex=1;ey=0;nn2=1;} nrx[p]=(float)(ex/nn2); nry[p]=(float)(ey/nn2); }
+        free(Jxx);free(Jyy);free(Jxy);free(tmp); }
       #define EW(q) ( (v[q]<athr || bar[q]) ? 0.0 : (double)(v[q]-athr+1) )   // HARD valley block
-      // RED-BLACK GAUSS-SEIDEL with SOR (omega=1.7): in-place (no double buffer), uses the
-      // newest neighbour values -> ~3-4x faster convergence than omega=1 Jacobi, so 250
-      // sweeps match the old 800. Red/black colouring keeps each colour's cells independent
-      // (4-neighbour stencil -> neighbours are the opposite colour) so it stays parallel-safe.
+      // RED-BLACK GAUSS-SEIDEL with SOR (omega=1.7), ANISOTROPIC: a neighbour in direction
+      // e is weighted by (1-(e.n)^2) -- ~1 along the sheet tangent, ~0 across the normal.
       const double omega=1.7;
       for(int it=0;it<250;it++) for(int color=0;color<2;color++){
         #pragma omp parallel for schedule(static)
         for(int y=0;y<d;y++)for(int x=0;x<d;x++){ if(((x+y)&1)!=color)continue; size_t p=(size_t)y*d+x;
           if(v[p]<athr || bar[p] || anc[p]) continue;     // air + valley walls + anchors fixed
+          double nx_=nrx[p],ny_=nry[p];
+          double ax=0.12+0.88*(1.0-nx_*nx_), ay=0.12+0.88*(1.0-ny_*ny_);  // tangent-biased, small isotropic floor
           double s=0,wsum=0,w;
-          if(x>0)  {w=EW(p-1);s+=w*wd[p-1];wsum+=w;} if(x<d-1){w=EW(p+1);s+=w*wd[p+1];wsum+=w;}
-          if(y>0)  {w=EW(p-d);s+=w*wd[p-d];wsum+=w;} if(y<d-1){w=EW(p+d);s+=w*wd[p+d];wsum+=w;}
-          if(wsum>0){ double avg=s/wsum; wd[p]=(float)(wd[p]+omega*(avg-wd[p])); } }
+          if(x>0)  {w=EW(p-1)*ax;s+=w*wd[p-1];wsum+=w;} if(x<d-1){w=EW(p+1)*ax;s+=w*wd[p+1];wsum+=w;}
+          if(y>0)  {w=EW(p-d)*ay;s+=w*wd[p-d];wsum+=w;} if(y<d-1){w=EW(p+d)*ay;s+=w*wd[p+d];wsum+=w;}
+          if(wsum>1e-9){ double avg=s/wsum; wd[p]=(float)(wd[p]+omega*(avg-wd[p])); } }
       }
       #undef EW
+      free(nrx);free(nry);
       printf("valley barriers: %ld inter-sheet-boundary px\n",nbar);
       // band by round(winding); count distinct wraps actually present
       int wlo=(int)floor(uwmin), whi=(int)ceil(uwmax); int nb=whi-wlo+1; if(nb<1)nb=1;
