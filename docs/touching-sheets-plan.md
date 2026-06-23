@@ -188,6 +188,23 @@ flat-∇W-at-leak trap). Intent: force the +1 increment W missed across a fused 
   label boundaries at min-sheetness. That is the real next build — the Boykov–Kolmogorov/Ishikawa
   construction, now MOTIVATED by a negative result rather than assumed.
 
+**Phase 3b HARD cut (in progress, 2026-06-23) — `tools/wind_cut.c`: verified maxflow + working ordered-cut
+scaffold; leak recovery needs the min-separation constraint.** Built VERIFY-FIRST: a Dinic maxflow (BFS
+level graph + blocking-flow DFS + residual min-cut) with a self-test — `wind_cut selftest` → ALL 7 PASS
+(bottleneck, parallel paths, CLRS=23, cut-partition consistency, 2×2 undirected grid, and the ∞ ordering
+arc = the Ishikawa monotonicity primitive). The bug-prone foundation the prior sessions deferred is now
+solid. On top: a greedy-NESTED level-set ordered cut — sweep wrap levels low→high, each a binary min-cut
+deciding which voxels advance past level k (far-outside auto-advances free, the thin band near the boundary
+is decided by the cut), n-link cap = sheetness so boundaries snap to min-sheetness, nesting by construction
+→ a valid monotone-outward integer labeling. RESULT on L1: runs (88s), produces a clean valid ordered
+labeling (flip 1.58% = TV level, recovered the 31st label TV merged), BUT does NOT yet recover leaked
+touches (distinct/ray 16.72, not up). DIAGNOSIS: the construction is DATA-DOMINATED — it reproduces
+floor(U) with min-sheetness boundary placement; where U leaked (no across-touch increment) the data term
+has no preference, so it cleans boundaries but cannot INVENT the missing wrap. NEXT (precise): add the
+LOGISMOS MIN-SEPARATION constraint (∞-arcs enforcing a minimum wrap count / δ_l ≤ f_i−f_{i+1} along each
+column) so a split is FORCED even where U is flat — that is what actually recovers a leaked wrap. The
+verified maxflow + the nested level-set scaffold are the infrastructure for it.
+
 ## Phase 1 — Winding-gated supervoxel merge (Family A; the actionable fix)
 
 Reuse `tools/svaff_seg.c` (SNIC supervoxels + per-supervoxel orientation + signed RAG + MWS). The wall
