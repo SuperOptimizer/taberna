@@ -388,6 +388,20 @@ int main(int argc,char**argv){
   long n0=agg_edges(raw0,nr0,NT,&a0,&b0,&w0,NULL,2); free(raw1);free(raw0);
   { long sh[5]={0}; for(long e=0;e<n1;e++){ int s=s1[e]; if(s>4)s=4; sh[s]++; }
     fprintf(stderr,"3D graph: %ld step-edges, %ld ties; step hist [0..4+]: %ld %ld %ld %ld %ld\n",n1,n0,sh[0],sh[1],sh[2],sh[3],sh[4]); }
+  // CONNECTIVITY diagnostic: the integer-offset fragility (center-stability, crop-overlap tail) comes
+  // from DISCONNECTED graph components -- each floats on the weak radius prior, and a small center
+  // change flips its integer offset by a whole wrap. Count weakly-connected components (step-edges +
+  // ties) via union-find. Few big components = offsets pinned by EDGES (stable); many = prior-pinned.
+  { int *uf=malloc(NT*sizeof(int)); for(int i=0;i<NT;i++)uf[i]=i;
+    #define UFIND(a) ({ int _r=a; while(uf[_r]!=_r)_r=uf[_r]=uf[uf[_r]]; _r; })
+    for(long e=0;e<n1;e++){ int ra=UFIND(a1[e]),rb=UFIND(b1[e]); if(ra!=rb)uf[ra]=rb; }
+    for(long e=0;e<n0;e++){ int ra=UFIND(a0[e]),rb=UFIND(b0[e]); if(ra!=rb)uf[ra]=rb; }
+    int *csz=calloc(NT,sizeof(int)); for(int i=0;i<NT;i++)csz[UFIND(i)]++;
+    int ncomp=0,big=0; long isolated=0; for(int i=0;i<NT;i++) if(csz[i]){ ncomp++; if(csz[i]>big)big=csz[i]; if(csz[i]==1)isolated++; }
+    printf("3D graph connectivity: %d nodes in %d components; largest=%.1f%%, singletons=%ld (%.1f%%) [fewer/bigger=offsets edge-pinned=robust]\n",
+      NT,ncomp,100.0*big/(NT?NT:1),isolated,100.0*isolated/(NT?NT:1));
+    #undef UFIND
+    free(uf);free(csz); }
   PHASE("3D graph");
   double WEQ_ARG=argc>13?atof(argv[13]):3.0;
 
