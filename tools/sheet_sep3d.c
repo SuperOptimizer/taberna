@@ -276,7 +276,12 @@ int main(int argc,char**argv){
         int nv=count_valleys(vs+(size_t)zc*dy*dx,dy,dx,cyz,cxz,uy,ux,Rr,vprom,pitchmin,0,tvsm0); if(nv>0)cnts[nc++]=nv; }
       if(nc>=36){ qsort(cnts,nc,sizeof(double),cmp_dbl); crossN=cnts[nc/2]; } }
     {
-      if(crossN>=3 && span>4){ double np=span/crossN;
+      // The graph solve inherently OVER-segments ~1.15x above span/pitch (recto/verso + touches add
+      // step-edges), so target graph==crossN by calibrating pitch 1.15x larger than span/crossN. This
+      // lands the final wrap count on the DIRECT sheet count (z3936: graph 44->~38) AND lifts pitch into
+      // the lower-backward-switch regime (a smaller pitch packs tighter sheets -> more leaks).
+      const double GRAPH_INFLATE=1.15;
+      if(crossN>=3 && span>4){ double np=GRAPH_INFLATE*span/crossN;
         // the SHEETNESS count is reliable (decoupled from the often-wrong autocorr at low contrast),
         // so trust span/count directly with only sane absolute bounds; intensity-valley fallback stays
         // tied to autocorr (less reliable). At low-z autocorr can be 2-6x off, so do NOT clamp to it.
