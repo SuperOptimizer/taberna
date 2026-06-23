@@ -214,6 +214,36 @@ int main(int argc,char**argv){
   int kmin=(int)(0.5*pitch+0.5); if(kmin<2)kmin=2;
   int tier=(int)(0.7*pitch+0.5); if(tier<3)tier=3; if(tier>30)tier=30;
   double vprom=0.35*athr; if(vprom<6)vprom=6; double pitchmin=0.20*pitch;
+  // ---- DATA-GROUND THE ABSOLUTE SCALE (review C2): calibrate pitch to the INDEPENDENT crossing count.
+  // The graph winding count is prior-dominated (fragmented graph; (r-rmin)/pitch sets each component's
+  // level), so a hand-set pitch leaks into the wrap count (count swung 23..35 over pitch 16..8 while the
+  // direct crossing count held ~30). Cast rays at mid-z, count sheet crossings, and set
+  // pitch = radial_span / count so the prior reproduces the MEASURED sheet density, not a free knob.
+  // Only when pitch is AUTO (an explicit pitch_arg is respected). Bounded to +-(40..60)% of autocorr.
+  double crossN=0;
+  if(pitch_arg<=0){
+    int zc=dz/2; const f32*vsz0=vs+(size_t)zc*dy*dx; double cyz=cy[zc],cxz=cx[zc];
+    // collect material radii to get the SPAN the N crossings actually occupy: (router - rinner),
+    // NOT the full radius from the umbilicus (the core is often a void). pitch = span / N.
+    size_t cap=(size_t)dy*dx; double*rad=malloc(cap*sizeof(double)); size_t nr=0;
+    for(int y=0;y<dy;y++)for(int x=0;x<dx;x++){ if(v[(size_t)zc*dy*dx+(size_t)y*dx+x]<athr)continue;
+      rad[nr++]=hypot(y-cyz,x-cxz); }
+    double Rmx=0,rinner=0; if(nr){ qsort(rad,nr,sizeof(double),cmp_dbl); Rmx=rad[nr-1]; rinner=rad[(size_t)(0.02*nr)]; } free(rad);
+    double span=Rmx-rinner; if(span<4)span=Rmx;
+    int tvsm0=(int)(pitch/6); if(tvsm0<1)tvsm0=1; if(tvsm0>10)tvsm0=10;
+    int Rr=(int)(Rmx+0.5); if(Rr>799)Rr=799; const int NA=72; double cnts[72]; int nc=0;
+    for(int a=0;a<NA;a++){ double th=2*M_PI*a/NA,uy=sin(th),ux=cos(th);
+      int nv=count_valleys(vsz0,dy,dx,cyz,cxz,uy,ux,Rr,vprom,pitchmin,0,tvsm0); if(nv>0)cnts[nc++]=nv; }
+    if(nc>=NA/2){ qsort(cnts,nc,sizeof(double),cmp_dbl); crossN=cnts[nc/2];
+      if(crossN>=3 && span>4){ double np=span/crossN;
+        if(np<0.6*pitch)np=0.6*pitch; if(np>1.6*pitch)np=1.6*pitch;
+        fprintf(stderr,"pitch calibrated to crossing count: autocorr=%.1f -> %.0f sheets over span=%.0f (r %.0f..%.0f) -> pitch=%.1f\n",pitch,crossN,span,rinner,Rmx,np);
+        pitch=np; walkr=(int)(1.6*pitch+0.5); if(walkr<8)walkr=8; if(walkr>120)walkr=120;
+        kmin=(int)(0.5*pitch+0.5); if(kmin<2)kmin=2;
+        tier=(int)(0.7*pitch+0.5); if(tier<3)tier=3; if(tier>30)tier=30; pitchmin=0.20*pitch;
+      }
+    }
+  }
   fprintf(stderr,"pitch=%.1f walk=%d kmin=%d tie=%d vprom=%.1f\n",pitch,walkr,kmin,tier,vprom);
 
   // CLASSICAL SURFACE-PROBABILITY FIELD (no ML): structure-tensor sheetness in [0,1], the non-ML
@@ -575,8 +605,15 @@ int main(int argc,char**argv){
           if(dir<=0){ if(val<cmin)cmin=val; if(val-cmin>=prom){ if(dir==-1)nv2++; dir=1;cmax=val; } } }
         if(nv2>0)shc[nsh++]=nv2; } }
     if(nc){ qsort(cnts,nc,sizeof(double),cmp_dbl); double shm=0; if(nsh){qsort(shc,nsh,sizeof(double),cmp_dbl);shm=shc[nsh/2];}
-      if(shz) fprintf(stderr,"radial-crossing estimate (median/%d rays, NOT ground truth): raw-valley=%.0f, SHEETNESS=%.0f, graph-solved=%.0f\n",nc,cnts[nc/2],shm,wmax-wmin);
-      else    fprintf(stderr,"radial-crossing estimate (median/%d rays, NOT ground truth): raw-valley=%.0f, graph-solved=%.0f\n",nc,cnts[nc/2],wmax-wmin); } }
+      double vcount=cnts[nc/2];
+      if(shz) fprintf(stderr,"radial-crossing estimate (median/%d rays, NOT ground truth): raw-valley=%.0f, SHEETNESS=%.0f, graph-solved=%.0f\n",nc,vcount,shm,wmax-wmin);
+      else    fprintf(stderr,"radial-crossing estimate (median/%d rays, NOT ground truth): raw-valley=%.0f, graph-solved=%.0f\n",nc,vcount,wmax-wmin);
+      // HARD COUNT GATE (review C2): the absolute scale must match the INDEPENDENT crossing count.
+      // The sheetness count is the most robust anchor (pitch-stable); fall back to raw-valley.
+      double anchor = (shz&&shm>0)? shm : vcount; double gs=wmax-wmin;
+      if(anchor>0){ double rel=fabs(gs-anchor)/anchor;
+        if(rel>0.15) fprintf(stderr,"*** SCALE WARNING: graph-solved %.0f wraps vs crossing-count %.0f (%.0f%% off) -- absolute scale is NOT data-pinned; pitch/prior may be wrong ***\n",gs,anchor,100*rel);
+        else fprintf(stderr,"scale check OK: graph %.0f vs crossing %.0f (%.0f%%)\n",gs,anchor,100*rel); } } }
   // does NODE winding climb with NODE radius? (isolates graph vs dense). bin by mean radius.
   { int NB=12; double bsum[12]={0};long bc[12]={0}; double Rmax=0;
     for(int i=0;i<K;i++) if(meanr[i]>Rmax)Rmax=meanr[i]; for(int i=0;i<RK;i++) if(rmeanr[i]>Rmax)Rmax=rmeanr[i];
