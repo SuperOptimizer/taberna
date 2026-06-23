@@ -587,6 +587,39 @@ int main(int argc,char**argv){
   }
   PHASE("3D dense");
 
+  // METRIC (no ground truth): SLICE CROSS-VALIDATION -- the rigorous held-out test of the 3D
+  // z-coupling (the whole point of solving in 3D vs stacking 2D slices). Remove ODD z-slices'
+  // anchors, re-run the fill from EVEN slices only, and compare the held-out odd-slice winding to
+  // the full solve. Small diff = even slices PREDICT the odd ones through z (genuine 3D coupling);
+  // large diff = each slice relies on its own anchors (2.5D). argv[25]=slicecv (doubles the fill).
+  int slicecv=argc>25?atoi(argv[25]):0;
+  if(slicecv && dz>=4){
+    f32*wc=calloc(nn,sizeof(f32));
+    for(size_t p=0;p<nn;p++){ int z=(int)(p/((size_t)dy*dx)); if(anc[p]&&!(z&1)) wc[p]=ancw[p]; }  // even-slice anchors only
+    #define MAT(q) (v[q]>=athr && !bar[q])
+    #define INPW(comp) (1.0 - (1.0-radw)*(comp)*(comp))
+    for(int it=0;it<NIT;it++)for(int color=0;color<2;color++){
+      #pragma omp parallel for schedule(static)
+      for(int z=0;z<dz;z++)for(int y=0;y<dy;y++)for(int x=0;x<dx;x++){ if(((x+y+z)&1)!=color)continue; size_t p=IDX(z,y,x);
+        if(v[p]<athr||bar[p])continue; double ddy=y-cy[z],ddx=x-cx[z],r=sqrt(ddy*ddy+ddx*ddx); double uy=r>1e-6?ddy/r:0,ux=r>1e-6?ddx/r:1;
+        double s=0,ws=0,w;
+        if(x>0   &&MAT(p-1)){ w=INPW(ux); s+=w*wc[p-1];ws+=w; }
+        if(x<dx-1&&MAT(p+1)){ w=INPW(ux); s+=w*wc[p+1];ws+=w; }
+        if(y>0   &&MAT(p-dx)){ w=INPW(uy); s+=w*wc[p-dx];ws+=w; }
+        if(y<dy-1&&MAT(p+dx)){ w=INPW(uy); s+=w*wc[p+dx];ws+=w; }
+        if(z>0   &&MAT(p-(size_t)dy*dx)){ s+=wc[p-(size_t)dy*dx];ws+=1.0; }
+        if(z<dz-1&&MAT(p+(size_t)dy*dx)){ s+=wc[p+(size_t)dy*dx];ws+=1.0; }
+        if(anc[p]&&!(z&1)){ double wa=LAM*ws+1e-6; s+=wa*ancw[p]; ws+=wa; }   // hold out ODD-slice anchors
+        if(ws>1e-9){ double tgt=s/ws; wc[p]=(f32)(wc[p]+omega*(tgt-wc[p])); } }
+    }
+    #undef MAT
+    #undef INPW
+    double sd=0; long no=0;
+    for(int z=1;z<dz;z+=2)for(int y=0;y<dy;y++)for(int x=0;x<dx;x++){ size_t p=IDX(z,y,x); if(v[p]<athr||bar[p])continue; sd+=fabs((double)wd[p]-wc[p]); no++; }
+    printf("3D slice cross-validation: held-out odd-slice winding vs full = %.3f wraps mean (small=even slices predict odd through z)\n", no?sd/no:0);
+    free(wc);
+  }
+
   // ---- outputs: mid-z xy slice (banded), (z,radius) reslice, raw volume ----
   int zm=dz/2; size_t zb=(size_t)zm*dy*dx;
   double sp=(wmax>wmin)?wmax-wmin:1.0;
