@@ -27,7 +27,7 @@
  *
  * usage: sheet_sep3d ARCHIVE OUTBASE lod z0 y0 x0 dz dy dx [minseg=40] [pitch=auto] [LAM=0.6]
  *        [WEQ=3] [z-tie=0] [use_recto=0] [LPRI=0.15] [radw=1] [barclose=1] [zmed=0] [SP=0]
- *        [umbref=1] [wdrescue=0] [robsig=0.6] [usesheet=1] [slicecv=0] [cxoff=0]
+ *        [umbref=1] [wdrescue=0] [robsig=0.9] [usesheet=1] [slicecv=0] [cxoff=0]
  *        [priorvol=] [priorlod=] [GLAM=0]
  * COARSE-GLOBAL PRIOR (the tiling fix): pass priorvol=a coarse _vol.f32 (solved once over the whole
  *   region) + priorlod=its LOD. Each fine tile then references ONE global winding instead of a
@@ -720,7 +720,9 @@ int main(int argc,char**argv){
   // neighbours were still unfilled (median 0). Run AFTER fill, neighbours carry the true local wrap,
   // so the median consensus is the real winding and Tukey-rejecting outliers removes cross-barrier
   // LEAKS without collapsing the climb. Verified by the fill-coverage guard (climb must stay high).
-  const double robsig=argc>23?atof(argv[23]):0.6;   // two-phase robust ON by default (verified safe)
+  const double robsig=argc>23?atof(argv[23]):0.9;   // two-phase robust; 0.9 = P3 sensitivity optimum
+  // (P3 sweep: backsw is U-shaped in robsig with a clear min at 0.9 at z3936 AND z2500 -- 0.6 over-rejected
+  //  legitimate sub-wrap variation (backsw 75), 1.4 too lenient lets leaks back (80); 0.9 -> 67, climb flat)
   // GLAM = strength of the per-voxel pull toward the coarse-global field cwv (argv[29]; only active
   // when a coarse prior was supplied). CORRECTION (review C1): the term is wg=GLAM*ws, so the coarse
   // field gets a CONSTANT relative weight GLAM/(1+GLAM) at EVERY material voxel (the ws factor cancels)
