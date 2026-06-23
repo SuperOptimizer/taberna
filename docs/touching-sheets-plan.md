@@ -97,11 +97,17 @@ optimizer; both lose to plain floor(W):
   region the high-sheetness voxels form ONE connected mass spanning ALL wraps (touches bridge everything)
   → one giant patch, meaningless mean-W; raising sthr 0.15→0.6 only erodes sheets into noise (793→1395
   tiny fragments around the same mega-blob) without breaking the bridges. Pure connectivity can't separate.
-CONCLUSION: the genuine touch fix is the GLOBAL ordered-label optimization (continuous-max-flow / graph
+- sheetness-GATED local mode-filter (propagate label only within a sheet, blocked at gaps): equals plain
+  despeckle, does NOT fix the along-sheet flip. A LOCAL filter structurally can't: where floor(W) is "3"
+  on one half of a sheet and "4" on the other (W crossed an integer along the sheet), both halves are
+  locally self-consistent — no local minority to flip. Fixing it needs GLOBAL propagation.
+CONCLUSION (lightweight space now exhausted — ray-ordered, CC-of-sheetness, local smoothing all = or <
+floor(W)): the genuine touch fix is the GLOBAL ordered-label optimization (continuous-max-flow / graph
 cut: integer L minimizing |L−W| + pairwise smoothness, with label boundaries pinned to low-sheetness
 gaps). That single formulation fixes BOTH defects (along-sheet flip via the smoothness+gap term, leaked
-touches via the ordering+separation constraint). This is the real Phase 3b/3 build and the clear next
-step; floor(W) (wind_label) is the robust interim instance labeler.
+touches via the ordering+separation constraint). It is the real Phase 3b/3 build — needs a maxflow
+(Boykov–Kolmogorov single-file) + Ishikawa ordered-label graph + banding/tiling for scale; a focused
+build, not a tail-of-session patch. floor(W) (wind_label, despeckled, _lab.i32) is the robust interim.
 
 ## Phase 1 — Winding-gated supervoxel merge (Family A; the actionable fix)
 

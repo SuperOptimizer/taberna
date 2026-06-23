@@ -50,6 +50,15 @@ int main(int argc,char**argv){
   u8*v=mca_read(arc,lod,z0,y0,x0,dz,dy,dx); if(!v){fprintf(stderr,"read fail\n");return 1;}
   size_t nn=(size_t)dz*dy*dx; int athr=air_threshold(v,nn);
 
+  // sheetness up front (small sigma; Phase 0a: lone sheets peak <=0.7) -> normalized [0,1]; used to GATE
+  // the label smoothing (propagate a label only WITHIN a sheet, never across a gap) and for the CC diag.
+  f32*vf=malloc(nn*sizeof(f32)),*sh=malloc(nn*sizeof(f32));
+  for(size_t p=0;p<nn;p++) vf[p]=v[p];
+  st_params spp=st_default_params(); spp.sigma_grad=1.0f; spp.sigma_tensor=0.8f;
+  st_sheet_detect(vf,dz,dy,dx,&spp,sh,NULL); free(vf);
+  { double smx=0; for(size_t p=0;p<nn;p++) if(sh[p]>smx)smx=sh[p]; if(smx<1e-6)smx=1;
+    for(size_t p=0;p<nn;p++) sh[p]=(f32)(sh[p]/smx); }
+
   FILE*pf=fopen(pvf,"rb"); if(!pf){fprintf(stderr,"priorvol open fail\n");return 1;}
   int hd[6]; if(fread(hd,sizeof(int),6,pf)!=6){fprintf(stderr,"hdr fail\n");return 1;}
   int cnz=hd[0],cny=hd[1],cnx=hd[2]; long cz0=hd[3],cy0=hd[4],cx0=hd[5];
@@ -68,19 +77,24 @@ int main(int argc,char**argv){
   free(cw);
   fprintf(stderr,"floor(W): %ld labelled voxels, wrap bands %ld..%ld (%ld wraps)\n",nlab,wmin,wmax,wmax-wmin+1);
 
-  // in-plane MODE filter (per z) to despeckle integer-crossing flicker; iterate radius-1 modr times
+  // SHEETNESS-GATED in-plane mode filter: each sheet voxel takes the MODE label of its high-sheetness
+  // (within-sheet) neighbors -> a label propagates ALONG a sheet (fixing the along-sheet floor(W) flip)
+  // but does NOT cross a gap (low-sheetness neighbors are excluded). At a touch (no gap) majority wins,
+  // so the wrap boundary shifts rather than collapsing (unlike pure CC). modr iterations, radius 1.
   long changed=0;
   if(modr>0){ s32*tmp=malloc(nn*sizeof(s32));
     for(int it=0;it<modr;it++){ memcpy(tmp,lab,nn*sizeof(s32));
       #pragma omp parallel for schedule(static) reduction(+:changed)
       for(int z=0;z<dz;z++)for(int y=0;y<dy;y++)for(int x=0;x<dx;x++){ size_t p=((size_t)z*dy+y)*dx+x;
-        if(tmp[p]<0)continue; int cnt[9]={0}; int val[9]; int nv=0;   // small local histogram
+        if(tmp[p]<0||sh[p]<sthr)continue; int cnt[9]={0}; int val[9]; int nv=0;   // local label histogram
         for(int ddy=-1;ddy<=1;ddy++)for(int ddx=-1;ddx<=1;ddx++){ int yy=y+ddy,xx=x+ddx;
-          if(yy<0||yy>=dy||xx<0||xx>=dx)continue; s32 L=tmp[((size_t)z*dy+yy)*dx+xx]; if(L<0)continue;
+          if(yy<0||yy>=dy||xx<0||xx>=dx)continue; size_t q=((size_t)z*dy+yy)*dx+xx;
+          if(sh[q]<sthr)continue;                                  // GATE: only propagate within a sheet
+          s32 L=tmp[q]; if(L<0)continue;
           int f=-1; for(int u=0;u<nv;u++) if(val[u]==L){f=u;break;} if(f<0){val[nv]=L;cnt[nv]=1;nv++;} else cnt[f]++; }
         int bi=-1,bc=0; for(int u=0;u<nv;u++) if(cnt[u]>bc){bc=cnt[u];bi=u;}
         if(bi>=0&&val[bi]!=tmp[p]){ lab[p]=val[bi]; changed++; } } }
-    free(tmp); fprintf(stderr,"mode-filter (r=1 x%d): %ld voxels relabeled (despeckle)\n",modr,changed); }
+    free(tmp); fprintf(stderr,"sheetness-gated mode-filter (x%d, sthr=%.2f): %ld relabeled\n",modr,sthr,changed); }
 
   // write label volume (i32) with the _vol-style int header
   char fn[700]; snprintf(fn,sizeof fn,"%s_lab.i32",outp); FILE*lf=fopen(fn,"wb");
@@ -108,14 +122,9 @@ int main(int argc,char**argv){
   // GLOBAL ordered-label optimization (continuous-max-flow / graph-cut: integer L minimizing |L-W| +
   // smoothness, boundaries pinned to low-sheetness gaps) -- the heavy Phase 3b build. _cc.ppm kept as a
   // diagnostic of the bridging. Mid-z slice (per-slice 2D CC).
-  f32*vf=malloc((size_t)dz*dy*dx*sizeof(f32)),*sh=malloc((size_t)dz*dy*dx*sizeof(f32));
-  for(size_t p=0;p<nn;p++) vf[p]=v[p];
-  st_params spp=st_default_params(); spp.sigma_grad=1.0f; spp.sigma_tensor=0.8f;
-  st_sheet_detect(vf,dz,dy,dx,&spp,sh,NULL); free(vf);
-  double smx=0; for(size_t p=0;p<nn;p++) if(sh[p]>smx)smx=sh[p]; if(smx<1e-6)smx=1;
   u8*sm=calloc((size_t)dy*dx,1);                                     // sheet mask on slice zc
   for(int y=0;y<dy;y++)for(int x=0;x<dx;x++){ size_t p=((size_t)zc*dy+y)*dx+x;
-    if(v[p]>=athr && sh[p]/smx>=sthr) sm[(size_t)y*dx+x]=1; }
+    if(v[p]>=athr && sh[p]>=sthr) sm[(size_t)y*dx+x]=1; }
   free(sh);
   s32*cc=malloc((size_t)dy*dx*sizeof(s32)); for(size_t i=0;i<(size_t)dy*dx;i++) cc[i]=-1;
   int *stk=malloc((size_t)dy*dx*sizeof(int)); int ncc=0; long merged2=0;
