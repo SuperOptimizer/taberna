@@ -472,6 +472,13 @@ int main(int argc,char**argv){
   // per-node radius indexed like the solve (recto 0..K-1, ridge K..) -- pairs with nodez[]
   double *nodeR=malloc(NT*sizeof(double));
   for(int i=0;i<K;i++) nodeR[i]=meanr[i]; for(int i=0;i<RK;i++) nodeR[K+i]=rmeanr[i];
+  // EDGE-CONSISTENCY (review H2): every step-edge a->b carries +nv (b is the OUTWARD node by the radial
+  // walk), so b should have larger radius. Edges where nodeR[b] < nodeR[a] mean the walk crossed back
+  // inward -- a symptom of an off-center umbilicus biasing the winding one-sided. We do NOT re-sign from
+  // radius (that would subordinate the reliable step-edges to the unreliable radius prior, backwards);
+  // we REPORT the rate so a bad umbilicus is visible instead of silently biasing the solve.
+  { long flip=0,tot=0; for(long e=0;e<n1;e++){ if(s1[e]<=0)continue; tot++; if(nodeR[b1[e]]<nodeR[a1[e]])flip++; }
+    if(tot) fprintf(stderr,"edge consistency: %ld/%ld (%.1f%%) step-edges point inward by radius (high => off-center umbilicus / winding bias)\n",flip,tot,100.0*flip/tot); }
   double *prior=malloc(NT*sizeof(double));
   for(int i=0;i<NT;i++) prior[i]=(nodeR[i]-rmin)/pitch;   // initial: constant-pitch Archimedean prior
   // WINDING-DISTANCE PRIOR (wdrescue==2): replace the Archimedean prior with the cumulative count
