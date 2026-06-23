@@ -184,3 +184,6 @@ target_link_libraries(svaff_seg PRIVATE taberna_io taberna_segmentation m)
 
 add_executable(sheetscale sheetscale.c)
 target_link_libraries(sheetscale PRIVATE taberna_io taberna_segmentation m)
+
+add_executable(wind_label wind_label.c)
+target_link_libraries(wind_label PRIVATE taberna_io taberna_segmentation m)

@@ -72,8 +72,26 @@ field-based Δw via a coarse `_vol.f32` + `cw_trilin`). Results:
   (regularize winding to a clean monotone integer label, snap jumps onto sheetness ridges). `svaff_seg`
   kept as the reusable supervoxel-RAG + orientation + winding-gate infra; it is NOT the wrap separator.
 
-**Next:** jump to Phase 3 (winding→monotone-integer-label regularization) as the real instance vehicle,
-and Phase 2b (leak detection: where the band map merges two wraps) to target it.
+**Phase 3 (done, 2026-06-23) — `tools/wind_label.c`, instance-label volume + a key geometry finding.**
+- FINDING: the LOGISMOS ordered-label idea with straight RADIAL rays as columns FAILS on this data. The
+  scroll is DEFORMED, so a straight ray cuts ACROSS the deformation and crosses wraps out of winding
+  order — W sampled along a ray is non-monotone (e.g. 0,3,9,7,6,2,13,…) EVEN with the exact umbilicus
+  (verified: tried material-centroid, W-min centroid, and the known (512,512) center — all give ~93%
+  forced increments, i.e. the per-ray monotone relabel is meaningless). The winding field is correct
+  (constant along each deformed sheet); it's the straight-ray column that's wrong. Ordered relabel needs
+  columns that follow grad W (streamlines perpendicular to sheets), or a global solve — NOT radial rays.
+- Also confirmed: the umbilicus must come from the field (W-min region), not the material centroid
+  (~20-30px off → rays cut wraps diagonally). Even so, rays are the wrong geometry.
+- SHIPPED (robust): `wind_label` writes a wrap-index INSTANCE-LABEL VOLUME = floor(W) per voxel,
+  despeckled with an in-plane mode filter (relabels ~2% of voxels at the integer-crossing flicker), +
+  an ordered-palette render and an `_lab.i32` volume for downstream. Full-res inspection: clean coherent
+  per-wrap sheets where the field is clean (adjacent wraps = distinct labels = SEPARATED), with residual
+  defects only where (a) a sheet spans an integer-W crossing ALONG its length (band phase not pinned to
+  the gap) and (b) convergence/touch zones.
+
+**Next:** the real touch fix = ordered relabel with grad-W-following columns (or continuous-max-flow on
+the voxel field, Phase 3b), which also pins band boundaries to gaps (fixes the along-sheet label flip).
+Phase 2b leak detection should likewise follow grad-W columns, not radial rays.
 
 ## Phase 1 — Winding-gated supervoxel merge (Family A; the actionable fix)
 
