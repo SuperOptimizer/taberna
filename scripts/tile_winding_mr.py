@@ -53,8 +53,12 @@ def main():
     pitch_f = 20                                  # native-L2 pitch; scaled per-LOD below
     # --- 1) ONE coarse global solve over the FULL 3D union, at COARSELOD ---
     s = 1 << (clod - flod)                         # fine->coarse downsample factor
-    cz0, cy0, cx0 = z0 // s, y0 // s, x0 // s
-    cdz, cdy, cdx = max(2, (uz1 - z0) // s), (uy1 - y0) // s, (ux1 - x0) // s
+    H = 1                                           # 1-coarse-voxel halo: ceil the size + pad so the
+    # far/edge fine voxels of the union still fall INSIDE the coarse field (else cw_trilin clamps to the
+    # edge value -> a flat coarse anchor on the union rim instead of a NaN fall-back to the radius prior).
+    cz0, cy0, cx0 = max(0, z0 // s - H), max(0, y0 // s - H), max(0, x0 // s - H)
+    cdz = max(2, -(-(uz1 - z0) // s) + 2 * H)      # -(-a//s) = ceil(a/s)
+    cdy, cdx = -(-(uy1 - y0) // s) + 2 * H, -(-(ux1 - x0) // s) + 2 * H
     cg = f"{outdir}/coarse"
     print(f"coarse solve @ LOD{clod}: z{cz0} y{cy0} x{cx0} + {cdz}x{cdy}x{cdx}")
     run(arc, clod, cz0, cy0, cx0, cdz, cdy, cdx, cg, max(4, pitch_f // s))
@@ -101,6 +105,13 @@ def main():
     # NOTE (review C1): with GLAM>0 every tile is pulled to the SAME coarse field, so this agreement
     # measures prior coupling, not independent correctness. The honest tiling number is the GLAM=0 run
     # (set GLAM='0' below); sheet_sep3d's '3D prior-departure: mean|wd-cwv|' reports how coupled each tile is.
+    # guard (review): direct averaging is only valid if seams carry NO integer offset. A nonzero
+    # median offset would average two wraps into a half-wrap band, invisible to per-tile metrics.
+    bigoff = [s_ for s_ in seams if abs(s_[1]) > 0.25]
+    if bigoff:
+        print(f"WARNING: {len(bigoff)} seam(s) with |offset|>0.25 wrap -- direct-average merge will corrupt them:")
+        for s_ in bigoff:
+            print(f"  {s_[0]}: off={s_[1]:+.2f}")
     # --- 4) merge: direct average over overlaps (offsets are ~0) ---
     Z0 = min(o[0] for _, o in tiles.values()); Y0 = min(o[1] for _, o in tiles.values()); X0 = min(o[2] for _, o in tiles.values())
     Z1 = max(o[0]+v.shape[0] for v, o in tiles.values())

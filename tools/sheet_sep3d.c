@@ -505,6 +505,7 @@ int main(int argc,char**argv){
   float*cwv=NULL; int haveprior=0;   // cwv = dense coarse winding sampled per fine voxel (fill anchor)
   if(argc>28 && argv[27][0]){
     const char*pvf=argv[27]; int plod=atoi(argv[28]);
+    if(plod<lod) fprintf(stderr,"WARN: prior LOD %d < fine LOD %d (coarse must be >= fine; a swapped arg gives a wrong scl=2^(lod-plod))\n",plod,lod);
     FILE*pf=fopen(pvf,"rb");
     if(!pf){ fprintf(stderr,"WARN: cannot open prior volume %s; using radius prior\n",pvf); }
     else{
@@ -678,9 +679,11 @@ int main(int argc,char**argv){
   // LEAKS without collapsing the climb. Verified by the fill-coverage guard (climb must stay high).
   const double robsig=argc>23?atof(argv[23]):0.6;   // two-phase robust ON by default (verified safe)
   // GLAM = strength of the per-voxel pull toward the coarse-global field cwv (argv[29]; only active
-  // when a coarse prior was supplied). Scaled by local coupling ws so it dominates ONLY where the
-  // fill is otherwise weakly determined (crop boundaries, unanchored bands) -- this is what makes
-  // adjacent tiles' DENSE fields agree, while sheet-anchored detail (LAM) still wins near anchors.
+  // when a coarse prior was supplied). CORRECTION (review C1): the term is wg=GLAM*ws, so the coarse
+  // field gets a CONSTANT relative weight GLAM/(1+GLAM) at EVERY material voxel (the ws factor cancels)
+  // -- NOT just at boundaries. So the dense field is partly the coarse field everywhere, which is what
+  // makes adjacent tiles agree (and is why that agreement is NOT independent evidence -- see the
+  // "prior-departure mean|wd-cwv|" diagnostic). LAM sheet-anchors still add on top near anchors.
   const double GLAM=(argc>29 && haveprior && cwv)?atof(argv[29]):0.0;
   const int NIT=200, ROBIT=40;
   for(int it=0;it<NIT;it++){ int robust = (robsig>0 && it>=NIT-ROBIT); for(int color=0;color<2;color++){
@@ -814,7 +817,8 @@ int main(int argc,char**argv){
       sal+=fabs(gx*nx+gy*ny+gz*nz); sg+=gm; na++; }  // gradient-WEIGHTED: emphasise across-sheet transitions
     (void)sg2;
     // validated to discriminate: robust-diffusion off->on lifts this 0.41->0.80 on the core crop.
-    printf("3D consistency: grad(w)-normal alignment=%.3f (1=ideal; winding varies across sheets, not along)\n", sg>1e-6?sal/sg:0); }
+    printf("3D consistency: grad(w)-normal alignment=%.3f (1=ideal; winding varies across sheets, not along)\n", sg>1e-6?sal/sg:0);
+    free(nrm); nrm=NULL; }   // ~3*nn floats, only used here
   #undef MAT
   // METRIC (no ground truth): PITCH-vs-AZIMUTH smoothness. A round scroll has the same inter-wrap
   // spacing at every angle; a squished/elliptical one has pitch(theta) varying smoothly with a
