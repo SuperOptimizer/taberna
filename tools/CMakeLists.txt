@@ -178,3 +178,6 @@ target_link_libraries(affinity_seg PRIVATE taberna_io taberna_segmentation m)
 
 add_executable(snic_view snic_view.c)
 target_link_libraries(snic_view PRIVATE taberna_io taberna_segmentation m)
+
+add_executable(svaff_seg svaff_seg.c)
+target_link_libraries(svaff_seg PRIVATE taberna_io taberna_segmentation m)
