@@ -47,6 +47,12 @@ def main():
     flod, z0, y0, x0, dz, ts, ny, nx, step, clod = map(int, (flod, z0, y0, x0, dz, ts, ny, nx, step, clod))
     nz   = int(a[12]) if len(a) > 12 else 1
     stepz = int(a[13]) if len(a) > 13 else dz
+    # COVERAGE GUARD: step must be <= tile size or tiles leave UNCOVERED gaps (black stripes in the
+    # unroll). Need overlap (step < size) for seam-stitching anyway. Warn loudly rather than fail.
+    if nz > 1 and stepz > dz:
+        print(f"*** WARNING: stepz={stepz} > dz={dz} -> {stepz-dz}-voxel Z GAPS between bands (uncovered). Use stepz<=dz (overlap).")
+    if (ny > 1 or nx > 1) and step > ts:
+        print(f"*** WARNING: step={step} > ts={ts} -> {step-ts}-voxel Y/X GAPS between tiles (uncovered). Use step<=ts (overlap).")
     os.makedirs(outdir, exist_ok=True)
     # union bbox in FINELOD coords
     uz1, uy1, ux1 = z0 + (nz-1)*stepz + dz, y0 + (ny-1)*step + ts, x0 + (nx-1)*step + ts
