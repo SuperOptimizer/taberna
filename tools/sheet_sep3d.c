@@ -686,16 +686,23 @@ int main(int argc,char**argv){
   // "prior-departure mean|wd-cwv|" diagnostic). LAM sheet-anchors still add on top near anchors.
   const double GLAM=(argc>29 && haveprior && cwv)?atof(argv[29]):0.0;
   const int NIT=200, ROBIT=40;
+  // PERF (review F7): the radial down-weights INPW(ux)/INPW(uy) are loop-invariant across all 200 sweeps
+  // (cy/cx are per-z constants) -- precompute them once instead of a sqrt+2 divides+2 INPW per voxel
+  // per sweep (~13B redundant ops at 32x1024^2).
+  f32*wux=malloc(nn*sizeof(f32)),*wuy=malloc(nn*sizeof(f32));
+  #pragma omp parallel for schedule(static)
+  for(int z=0;z<dz;z++)for(int y=0;y<dy;y++)for(int x=0;x<dx;x++){ size_t p=IDX(z,y,x);
+    double ddy=y-cy[z],ddx=x-cx[z],r=sqrt(ddy*ddy+ddx*ddx); double uy=r>1e-6?ddy/r:0,ux=r>1e-6?ddx/r:1;
+    wux[p]=(f32)INPW(ux); wuy[p]=(f32)INPW(uy); }
   for(int it=0;it<NIT;it++){ int robust = (robsig>0 && it>=NIT-ROBIT); for(int color=0;color<2;color++){
     #pragma omp parallel for schedule(static)
     for(int z=0;z<dz;z++)for(int y=0;y<dy;y++)for(int x=0;x<dx;x++){ if(((x+y+z)&1)!=color)continue; size_t p=IDX(z,y,x);
       if(v[p]<athr||bar[p])continue;
-      double ddy=y-cy[z],ddx=x-cx[z],r=sqrt(ddy*ddy+ddx*ddx); double uy=r>1e-6?ddy/r:0,ux=r>1e-6?ddx/r:1;
-      double nval[6],nwt[6]; int nn2=0;
-      if(x>0   &&MAT(p-1)){ nval[nn2]=wd[p-1];nwt[nn2]=INPW(ux);nn2++; }
-      if(x<dx-1&&MAT(p+1)){ nval[nn2]=wd[p+1];nwt[nn2]=INPW(ux);nn2++; }
-      if(y>0   &&MAT(p-dx)){ nval[nn2]=wd[p-dx];nwt[nn2]=INPW(uy);nn2++; }
-      if(y<dy-1&&MAT(p+dx)){ nval[nn2]=wd[p+dx];nwt[nn2]=INPW(uy);nn2++; }
+      double nval[6],nwt[6]; int nn2=0; double wxp=wux[p],wyp=wuy[p];
+      if(x>0   &&MAT(p-1)){ nval[nn2]=wd[p-1];nwt[nn2]=wxp;nn2++; }
+      if(x<dx-1&&MAT(p+1)){ nval[nn2]=wd[p+1];nwt[nn2]=wxp;nn2++; }
+      if(y>0   &&MAT(p-dx)){ nval[nn2]=wd[p-dx];nwt[nn2]=wyp;nn2++; }
+      if(y<dy-1&&MAT(p+dx)){ nval[nn2]=wd[p+dx];nwt[nn2]=wyp;nn2++; }
       if(z>0   &&MAT(p-(size_t)dy*dx)){ nval[nn2]=wd[p-(size_t)dy*dx];nwt[nn2]=1.0;nn2++; }
       if(z<dz-1&&MAT(p+(size_t)dy*dx)){ nval[nn2]=wd[p+(size_t)dy*dx];nwt[nn2]=1.0;nn2++; }
       double s=0,ws=0;
@@ -709,6 +716,7 @@ int main(int argc,char**argv){
       if(GLAM>0 && isfinite(cwv[p])){ double wg=GLAM*ws+1e-9; s+=wg*cwv[p]; ws+=wg; }
       if(ws>1e-9){ double tgt=s/ws; wd[p]=(f32)(wd[p]+omega*(tgt-wd[p])); } }
   } }
+  free(wux); free(wuy);
   #undef MAT
   #undef INPW
   #undef TANW
