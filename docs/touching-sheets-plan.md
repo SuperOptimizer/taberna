@@ -46,6 +46,35 @@ through them.
 
 ---
 
+## IMPLEMENTATION LOG
+
+**Phase 0a (done, 2026-06-23):** `tools/sheetscale.c`. Multiscale-σ argmax fused-wrap detector is WEAK
+— touch fraction flat ~0.30 across core/centered/delaminated (thickness↔fusion confound = the wall from
+the scale-space angle). But the SCALE finding is solid: lone sheets peak at σ≤0.7, so `sheet_sep3d`'s
+default σ_tensor≈1.5 over-smooths. Actionable for Phase 1/2 (use small-σ detection).
+
+**Phase 1 (done, 2026-06-23) — PIVOTAL FINDING: winding-as-label works; MWS is the wrong vehicle.**
+Built the winding gate in `tools/svaff_seg.c` (geometric Δw=Δr/pitch−Δθ/2π with auto-handedness, AND
+field-based Δw via a coarse `_vol.f32` + `cw_trilin`). Results:
+- Geometric Δr/pitch fails on DEFORMED wraps (radius-from-center swings around a wrap → tangential
+  over-cutting). The angular term is negligible for adjacent supervoxels. Center accuracy matters but
+  isn't the whole story.
+- Field-based Δw is better (respects deformation) but supervoxel+MWS still FRAGMENTS (thousands of
+  segments, not ~27 wraps) — MWS cascade-mutexes + supervoxel/band-width aliasing (d_seed≈pitch ⇒ a
+  supervoxel's centroid band is a coin-flip).
+- DECISIVE: rendering the coarse field as grayscale shows a CLEAN smooth concentric gradient (winding
+  0→27), and a DIRECT voxel-level `floor(winding)` band map (ordered palette) shows clean concentric
+  per-wrap instance rings. **The winding field already separates wraps; the instance label is just
+  floor(winding) at voxel resolution.** The supervoxel/MWS detour ADDED fragmentation for no benefit.
+- CONCLUSION / REDIRECT: drop MWS as the separation vehicle. The Family-A fix is `floor(regularized
+  winding)` applied to the voxel field. Remaining defects = band-boundary speckle (floor flips at
+  integer crossings) + leaked touches (field merges two wraps into one band) → both are exactly Phase 3
+  (regularize winding to a clean monotone integer label, snap jumps onto sheetness ridges). `svaff_seg`
+  kept as the reusable supervoxel-RAG + orientation + winding-gate infra; it is NOT the wrap separator.
+
+**Next:** jump to Phase 3 (winding→monotone-integer-label regularization) as the real instance vehicle,
+and Phase 2b (leak detection: where the band map merges two wraps) to target it.
+
 ## Phase 1 — Winding-gated supervoxel merge (Family A; the actionable fix)
 
 Reuse `tools/svaff_seg.c` (SNIC supervoxels + per-supervoxel orientation + signed RAG + MWS). The wall
