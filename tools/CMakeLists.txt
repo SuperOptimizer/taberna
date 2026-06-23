@@ -190,3 +190,6 @@ target_link_libraries(wind_label PRIVATE taberna_io taberna_segmentation m)
 
 add_executable(wind_tv wind_tv.c)
 target_link_libraries(wind_tv PRIVATE taberna_io taberna_segmentation m)
+
+add_executable(wind_cut wind_cut.c)
+target_link_libraries(wind_cut PRIVATE taberna_io taberna_segmentation m)
