@@ -181,3 +181,6 @@ target_link_libraries(snic_view PRIVATE taberna_io taberna_segmentation m)
 
 add_executable(svaff_seg svaff_seg.c)
 target_link_libraries(svaff_seg PRIVATE taberna_io taberna_segmentation m)
+
+add_executable(sheetscale sheetscale.c)
+target_link_libraries(sheetscale PRIVATE taberna_io taberna_segmentation m)
