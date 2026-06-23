@@ -28,7 +28,7 @@
  * usage: sheet_sep3d ARCHIVE OUTBASE lod z0 y0 x0 dz dy dx [minseg=40] [pitch=auto] [LAM=0.6]
  *        [WEQ=3] [z-tie=0] [use_recto=0] [LPRI=0.15] [radw=1] [barclose=1] [zmed=0] [SP=0]
  *        [umbref=1] [wdrescue=0] [robsig=0.9] [usesheet=1] [slicecv=0] [cxoff=0]
- *        [priorvol=] [priorlod=] [GLAM=0]
+ *        [priorvol=] [priorlod=] [GLAM=0] [NF=0] [prep=0] [l0scale=4] [epsmul=0.1] [touchprom=0]
  * COARSE-GLOBAL PRIOR (the tiling fix): pass priorvol=a coarse _vol.f32 (solved once over the whole
  *   region) + priorlod=its LOD. Each fine tile then references ONE global winding instead of a
  *   per-crop radius prior -> tiles share an absolute scale. LPRI~8 pins the NODE solve; GLAM~0.3
@@ -287,6 +287,21 @@ int main(int argc,char**argv){
   double sigprom = usesheet? 0.25*255.0 : vprom;    // inter-sheet valley prominence on the signal
   double ridgethr= usesheet? 0.12*255.0 : athr;     // "is on a sheet" floor for the ridge
   double barprom = usesheet? 0.015*255.0 : 0.10*vprom;  // min per-side dip to mark an inter-sheet barrier
+  // TOUCH BARRIER (argv[34], 0=off): TESTED-NEGATIVE, kept as documented default-off infrastructure.
+  // Idea: the air-gap detector above misses TOUCHING wraps -- where the gap has closed, intensity stays
+  // high, so no radial intensity-min marks the contact and the dense fill leaks across, merging two
+  // wraps (~0.5-wrap smear, lost +1 step). The hope was that a fused contact is STILL a shallow radial
+  // sheetness local-min between the two crests (normal radial, across high), catchable with a prominence
+  // floor far below barprom gated to radial-normal geometry. IT IS NOT, at voxel resolution: a sweep on
+  // both a centered (z3936_c) and an outer-delaminated (z3936_big) crop shows a CLIFF -- touchprom<=2
+  // floods (50k-210k shallow-noise minima on the flanks, backward-switch 67->68/86->88, slightly WORSE)
+  // and touchprom>=4 marks ZERO. There is no population of genuine deep touch saddles between: the
+  // structure tensor (sigma_tensor=3) sees two fused wraps as ONE thick planar slab, so sheetness stays
+  // uniformly high with no saddle to detect. Same lesson as the affinity over-fragmentation (affinity_seg):
+  // touch SEPARATION is not a local voxel property -- it needs supervoxel aggregation over the whole
+  // contact patch, or global context. The lighter integration genuinely does not work; left here so the
+  // negative is reproducible (set touchprom>0) rather than re-attempted. See [[sheet-sep-spiral-fit]].
+  double touchprom = argc>34? atof(argv[34]) : 0.0;     // sheetness-min floor at radial-normal touches (negative)
   // ---- DATA-GROUND THE ABSOLUTE SCALE (review C2): calibrate pitch to the INDEPENDENT crossing count.
   // The graph winding count is prior-dominated (fragmented graph; (r-rmin)/pitch sets each component's
   // level), so a hand-set pitch leaks into the wrap count (count swung 23..35 over pitch 16..8 while the
@@ -381,8 +396,8 @@ int main(int argc,char**argv){
 
   // radial unit dir per voxel (in-plane, outward from per-z center)
   // ridge = radial intensity max; recto = material with air outward; bar = radial min
-  u8*ridge=calloc(nn,1),*recto=calloc(nn,1),*bar=calloc(nn,1);
-  #pragma omp parallel for schedule(static)
+  u8*ridge=calloc(nn,1),*recto=calloc(nn,1),*bar=calloc(nn,1); long touchcnt=0;
+  #pragma omp parallel for schedule(static) reduction(+:touchcnt)
   for(int z=0;z<dz;z++)for(int y=0;y<dy;y++)for(int x=0;x<dx;x++){ size_t p=IDX(z,y,x); if(v[p]<athr)continue;
     double ddy=y-cy[z],ddx=x-cx[z],r=sqrt(ddy*ddy+ddx*ddx); if(r<2)continue; double uy=ddy/r,ux=ddx/r;
     int iy=(int)lround(y-uy),ix=(int)lround(x-ux),oy=(int)lround(y+uy),ox=(int)lround(x+ux);
@@ -395,6 +410,13 @@ int main(int argc,char**argv){
     // radial local min = inter-sheet boundary. Require a real dip on BOTH sides (review: the old
     // c<=in&&c<=ou fired on flat runs, over-sealing the diffusion and biasing the fill).
     if(in-c>=barprom && ou-c>=barprom) bar[p]=1;
+    // touch contact: radial sheetness local-min (shallow), normal radial -> a fused-wrap boundary the
+    // air-gap test above can't see. Only fires at a genuine radial min (never in a crest interior).
+    // The contact voxel itself must be HIGH-sheetness (a fused-papyrus saddle, planarity barely
+    // interrupted): this is what separates a real touch from an air gap (sig->0 there, already caught
+    // above) and from a crest FLANK (sig low, just noise -- the flood that a bare prominence floor hit).
+    else if(touchprom>0 && nrm && c>=ridgethr){ double ax=fabs((double)nrm[3*p+1]*uy+(double)nrm[3*p+0]*ux);
+      if(ax>0.7 && in-c>=touchprom && ou-c>=touchprom){ bar[p]=1; touchcnt++; } }
     for(int k=1;k<=3;k++){ int ry=(int)lround(y+uy*k),rx=(int)lround(x+ux*k);
       if(ry>=0&&ry<dy&&rx>=0&&rx<dx&&v[IDX(z,ry,rx)]<athr){ recto[p]=1; break; } } }
   if(!use_recto) memset(recto,0,nn);   // ridge-only mode: drop the unreliable recto graph
@@ -412,6 +434,8 @@ int main(int argc,char**argv){
         for(int y=0;y<dy;y++)for(int x=0;x<dx;x++){ size_t q=(size_t)y*dx+x; if(!tb[q])continue;
           if((x>0&&!tb[q-1])||(x<dx-1&&!tb[q+1])||(y>0&&!tb[q-dx])||(y<dy-1&&!tb[q+dx])) bz[q]=0; } } }
     free(tb); }
+  if(touchprom>0){ long barc=0; for(size_t p=0;p<nn;p++) barc+=bar[p];
+    fprintf(stderr,"touch-barrier: +%ld fused-contact voxels (touchprom=%.2f) -> %ld total bar\n",touchcnt,touchprom,barc); }
   PHASE("3D detect");
 
   // PER-SLICE 2D labeling (NOT 3D): 3D connected components percolate across touching wraps
