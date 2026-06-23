@@ -737,6 +737,25 @@ int main(int argc,char**argv){
   for(int z=0;z<dz;z++)for(int y=0;y<dy;y++)for(int x=0;x<dx;x++){ size_t p=IDX(z,y,x);
     double ddy=y-cy[z],ddx=x-cx[z],r=sqrt(ddy*ddy+ddx*ddx); double uy=r>1e-6?ddy/r:0,ux=r>1e-6?ddx/r:1;
     wux[p]=(f32)INPW(ux); wuy[p]=(f32)INPW(uy); }
+  // NORMAL FORCING (review P2): the fill currently just diffuses between sparse sheet anchors, so it
+  // drifts where anchors are far (the per-crop divergence GLAM papers over). Drive it instead to match
+  // the ACTUAL sheet geometry: desired winding gradient g = n_out/pitch (sheet normal oriented outward),
+  // forcing = div(g). Subtracting it from the diffusion target (Poisson, library convention num=acc-f)
+  // pins the fill to the sheets EVERYWHERE, not just at anchors. argv[30]=NF strength (0=off).
+  const double NF=(argc>30 && usesheet && nrm)?atof(argv[30]):0.0;
+  f32*forcing=NULL;
+  if(NF>0){
+    f32*gx=calloc(nn,sizeof(f32)),*gy=calloc(nn,sizeof(f32)),*gz=calloc(nn,sizeof(f32));
+    #pragma omp parallel for schedule(static)
+    for(int z=0;z<dz;z++)for(int y=0;y<dy;y++)for(int x=0;x<dx;x++){ size_t p=IDX(z,y,x); if(v[p]<athr||bar[p])continue;
+      double nx=nrm[3*p+0],ny=nrm[3*p+1],nz=nrm[3*p+2];
+      double rx=x-cx[z],ry=y-cy[z]; if(nx*rx+ny*ry<0){nx=-nx;ny=-ny;nz=-nz;}   // orient outward
+      gx[p]=(f32)(nx/pitch); gy[p]=(f32)(ny/pitch); gz[p]=(f32)(nz/pitch); }
+    forcing=calloc(nn,sizeof(f32));
+    #pragma omp parallel for schedule(static)
+    for(int z=1;z<dz-1;z++)for(int y=1;y<dy-1;y++)for(int x=1;x<dx-1;x++){ size_t p=IDX(z,y,x); if(v[p]<athr||bar[p])continue;
+      forcing[p]=(f32)(0.5*((double)gx[p+1]-gx[p-1])+0.5*((double)gy[p+dx]-gy[p-dx])+0.5*((double)gz[p+(size_t)dy*dx]-gz[p-(size_t)dy*dx])); }
+    free(gx);free(gy);free(gz); fprintf(stderr,"normal forcing ON (NF=%.2f)\n",NF); }
   for(int it=0;it<NIT;it++){ int robust = (robsig>0 && it>=NIT-ROBIT); for(int color=0;color<2;color++){
     #pragma omp parallel for schedule(static)
     for(int z=0;z<dz;z++)for(int y=0;y<dy;y++)for(int x=0;x<dx;x++){ if(((x+y+z)&1)!=color)continue; size_t p=IDX(z,y,x);
@@ -757,9 +776,10 @@ int main(int argc,char**argv){
       } else { for(int j=0;j<nn2;j++){ s+=nwt[j]*nval[j]; ws+=nwt[j]; } }
       if(anc[p]){ double wa=LAM*ws+1e-6; s+=wa*ancw[p]; ws+=wa; }
       if(GLAM>0 && isfinite(cwv[p])){ double wg=GLAM*ws+1e-9; s+=wg*cwv[p]; ws+=wg; }
+      if(forcing) s -= NF*forcing[p];   // Poisson term: pulls the target so grad(w) follows the sheet normal
       if(ws>1e-9){ double tgt=s/ws; wd[p]=(f32)(wd[p]+omega*(tgt-wd[p])); } }
   } }
-  free(wux); free(wuy);
+  free(wux); free(wuy); if(forcing)free(forcing);
   #undef MAT
   #undef INPW
   #undef TANW
