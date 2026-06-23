@@ -146,7 +146,7 @@ add_executable(polar_sheet polar_sheet.c)
 target_link_libraries(polar_sheet PRIVATE taberna_io taberna_annotate taberna_segmentation m)
 
 add_executable(unroll_wind unroll_wind.c)
-target_link_libraries(unroll_wind PRIVATE taberna_io m)
+target_link_libraries(unroll_wind PRIVATE taberna_io taberna_annotate m)
 if(OpenMP_C_FOUND)
   target_link_libraries(unroll_wind PRIVATE OpenMP::OpenMP_C)
 endif()

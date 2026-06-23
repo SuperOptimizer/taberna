@@ -17,14 +17,31 @@
  * The inner umbilicus core (winding ill-defined as r->0) is trimmed via the 1..99.5 percentile of
  * the render coordinate.
  *
- *   unroll_wind ARCHIVE lod WINDING.f32 OUT.pgm [SAMP=160] [CY CX]
+ *   unroll_wind ARCHIVE lod WINDING.f32 OUT.pgm [SAMP=160] [CY CX | "auto"]
+ *   (CY=="auto": compute the umbilicus center from the archive LOD5 at the winding region mid-z.)
  */
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <math.h>
 #include "io/mca.h"
+#include "annotate/umbilicus.h"
 
 static int cmp_f32(const void*a,const void*b){ float x=*(const float*)a,y=*(const float*)b; return (x>y)-(x<y); }
+
+// Umbilicus center (merged-local y,x) at a winding region's mid-z, from the archive's coarse LOD5 axis.
+static int auto_center(const char*arc,int lod,int z0,int y0,int x0,int dz,double*cy,double*cx){
+  mca_handle*h=mca_open(arc); if(!h)return -1;
+  int fz,fy,fx,nl; float q; mca_handle_dims(h,&fz,&fy,&fx,&q,&nl);
+  int cl=5; double cs=(double)(1<<cl); int ccz=(int)(fz/cs),ccy=(int)(fy/cs),ccx=(int)(fx/cs);
+  u8*c=mca_read(h,cl,0,0,0,ccz,ccy,ccx); if(!c){mca_close(h);return -1;}
+  size_t n=(size_t)ccz*ccy*ccx; u8*m=malloc(n); for(size_t i=0;i<n;i++)m[i]=c[i]!=0; free(c);
+  umbilicus umb; int rc=umbilicus_estimate(m,ccz,ccy,ccx,9,&umb); free(m); mca_close(h);
+  if(rc){return -1;}
+  double ls=(double)(1<<lod), coarse_z=(z0+dz/2)*ls/cs; if(coarse_z<0)coarse_z=0; if(coarse_z>ccz-1)coarse_z=ccz-1;
+  f32 ucy,ucx; umbilicus_center(&umb,(f32)coarse_z,&ucy,&ucx); umbilicus_free(&umb);
+  *cy=ucy*cs/ls-y0; *cx=ucx*cs/ls-x0; return 0;
+}
 
 // NaN-aware trilinear sample of a winding volume (averages only finite corners; NAN if none).
 static double wtrilin(const float*w,int nz,int ny,int nx,double z,double y,double x){
@@ -42,13 +59,16 @@ int main(int argc,char**argv){
   if(argc<5){ fprintf(stderr,"usage: %s ARCHIVE lod WINDING.f32 OUT.pgm [SAMP=160] [CY CX]\n",argv[0]); return 2; }
   const char*arc=argv[1]; int lod=atoi(argv[2]); const char*wf=argv[3],*outp=argv[4];
   int SAMP=argc>5?atoi(argv[5]):160;
-  int spiral = (argc>7);
-  double cy=spiral?atof(argv[6]):0, cx=spiral?atof(argv[7]):0;
+  int spiral = (argc>6 && (argc>7 || !strcmp(argv[6],"auto")));
+  int autoc = (argc>6 && !strcmp(argv[6],"auto"));
+  double cy=(spiral&&!autoc)?atof(argv[6]):0, cx=(spiral&&!autoc)?atof(argv[7]):0;
   FILE*f=fopen(wf,"rb"); if(!f){ fprintf(stderr,"open %s fail\n",wf); return 1; }
   int hdr[6]; if(fread(hdr,sizeof(int),6,f)!=6){ fprintf(stderr,"bad header\n"); return 1; }
   int dz=hdr[0],dy=hdr[1],dx=hdr[2],z0=hdr[3],y0=hdr[4],x0=hdr[5];
   size_t nn=(size_t)dz*dy*dx; float*w=malloc(nn*sizeof(float));
   if(fread(w,sizeof(float),nn,f)!=nn){ fprintf(stderr,"short winding volume\n"); return 1; } fclose(f);
+  if(autoc){ if(auto_center(arc,lod,z0,y0,x0,dz,&cy,&cx)){ fprintf(stderr,"auto-center failed\n"); return 1; }
+    fprintf(stderr,"auto umbilicus center (merged-local) = (%.1f, %.1f)\n",cy,cx); }
   fprintf(stderr,"winding %dx%dx%d @ lod%d (z%d y%d x%d) mode=%s\n",dz,dy,dx,lod,z0,y0,x0,spiral?"SPIRAL":"radial");
 
   const double TWO_PI=6.283185307179586;
@@ -60,9 +80,11 @@ int main(int argc,char**argv){
   // (trilinear-upsampled) against a FINER CT archive over a thin z-band [ZA,ZA+ZN) of the winding,
   // for ink-scale resolution the L2 winding doesn't carry. The finer archive is ==scale x the
   // winding archive (padded), so finevoxel = scale * windingvoxel. Requires spiral (CY CX).
-  int fine = (argc>11);
-  const char*ctarc = fine?argv[8]:arc; int scale=fine?atoi(argv[9]):1;
-  int za=fine?atoi(argv[10]):0, zn=fine?atoi(argv[11]):dz;
+  // fine-mode args start after the center: argv[8..] for "CY CX", argv[7..] for "auto" (one slot).
+  int fbase = autoc ? 7 : 8;
+  int fine = (argc > fbase+3);
+  const char*ctarc = fine?argv[fbase]:arc; int scale=fine?atoi(argv[fbase+1]):1;
+  int za=fine?atoi(argv[fbase+2]):0, zn=fine?atoi(argv[fbase+3]):dz;
   if(fine && !spiral){ fprintf(stderr,"fine mode needs CY CX (spiral)\n"); return 2; }
   if(za<0)za=0; if(za+zn>dz)zn=dz-za;
 
