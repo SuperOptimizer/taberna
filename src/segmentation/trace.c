@@ -5,6 +5,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
+#include <stdio.h>
 
 #define IDX(z,y,x) ((size_t)(z)*nynx + (size_t)(y)*nx + (x))
 
@@ -130,6 +131,8 @@ int sheet_trace_lab(const f32 *vol, int nz, int ny, int nx, const trace_params *
   if(!sheet||!normal){free(sheet);free(normal);return -1;}
   if(st_sheet_detect(vol,nz,ny,nx,&p.st,sheet,normal)!=0){free(sheet);free(normal);return -1;}
   u8 *visited=calloc(N,1); frontpt *q=malloc(N*sizeof(frontpt)); int nsheets=0;
+  int dbg = getenv("TR_DBG")!=NULL;
+  long att=0,fsnap=0,fnorm=0,fbound=0,fvis=0,acc=0;
   for (int sz=0; sz<nz; sz++) for(int sy=0; sy<ny; sy++) for(int sx=0; sx<nx; sx++){
     size_t si=IDX(sz,sy,sx);
     if (visited[si] || sheet[si] < p.seed_thresh || vol[si] < p.i_min) continue;
@@ -150,19 +153,22 @@ int sheet_trace_lab(const f32 *vol, int nz, int ny, int nx, const trace_params *
         f32 ang=k*0.7853981634f, cu=cosf(ang), cv=sinf(ang);
         f32 dz=cu*t1[0]+cv*t2[0], dy=cu*t1[1]+cv*t2[1], dx=cu*t1[2]+cv*t2[2];
         f32 qz=cp.z+p.step*dz, qy=cp.y+p.step*dy, qx=cp.x+p.step*dx;
+        att++;
         f32 nn[3]; normal_at(normal,nz,ny,nx,qz,qy,qx,nn);
-        if(!snap(vol,sheet,nz,ny,nx,p.snap_radius,p.i_min,p.cont_thresh,nn,&qz,&qy,&qx)) continue;
-        if(fabsf(n[0]*nn[0]+n[1]*nn[1]+n[2]*nn[2]) < p.normal_cos) continue;
+        if(!snap(vol,sheet,nz,ny,nx,p.snap_radius,p.i_min,p.cont_thresh,nn,&qz,&qy,&qx)) { fsnap++; continue; }
+        if(fabsf(n[0]*nn[0]+n[1]*nn[1]+n[2]*nn[2]) < p.normal_cos) { fnorm++; continue; }
         int wz=(int)lroundf(qz),wy=(int)lroundf(qy),wx=(int)lroundf(qx);
-        if(wz<0||wz>=nz||wy<0||wy>=ny||wx<0||wx>=nx) continue;
+        if(wz<0||wz>=nz||wy<0||wy>=ny||wx<0||wx>=nx) { fbound++; continue; }
         draw_line_lab(lab,nz,ny,nx,cp.z,cp.y,cp.x,qz,qy,qx,id);
-        size_t wi=IDX(wz,wy,wx); if(visited[wi]) continue;
-        visited[wi]=1; lab[wi]=id;
+        size_t wi=IDX(wz,wy,wx); if(visited[wi]) { fvis++; continue; }
+        visited[wi]=1; lab[wi]=id; acc++;
         if(tail<(size_t)N) q[tail++]=(frontpt){qz,qy,qx,nn[0],nn[1],nn[2]};
       }
     }
     nsheets++;
   }
+  if(dbg) fprintf(stderr,"[TR_DBG] growth attempts=%ld  fail: snap=%ld(%.0f%%) normcos=%ld(%.0f%%) bounds=%ld visited=%ld(%.0f%%)  accepted=%ld(%.0f%%)\n",
+    att,fsnap,100.0*fsnap/(att?att:1),fnorm,100.0*fnorm/(att?att:1),fbound,fvis,100.0*fvis/(att?att:1),acc,100.0*acc/(att?att:1));
   free(sheet);free(normal);free(visited);free(q);
   return nsheets;
 }
