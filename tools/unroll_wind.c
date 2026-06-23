@@ -52,6 +52,10 @@ int main(int argc,char**argv){
   fprintf(stderr,"winding %dx%dx%d @ lod%d (z%d y%d x%d) mode=%s\n",dz,dy,dx,lod,z0,y0,x0,spiral?"SPIRAL":"radial");
 
   const double TWO_PI=6.283185307179586;
+  // azimuth handedness: w_spiral = w + WSIGN*atan2/2pi. WSIGN=+1 (CCW) by default; a CW-wound scroll
+  // needs -1 or every wrap folds back on itself. Auto-detect from radial winding alone is unreliable,
+  // so expose it as an env knob (UNROLL_WSIGN=-1) until an L0 text pass can calibrate it.
+  double wsign=1.0; { const char*e=getenv("UNROLL_WSIGN"); if(e){ wsign=atof(e); if(wsign==0)wsign=1.0; } }
   // FINE mode (argv[8]=finer archive, [9]=scale, [10]=ZA, [11]=ZN): sample the winding
   // (trilinear-upsampled) against a FINER CT archive over a thin z-band [ZA,ZA+ZN) of the winding,
   // for ink-scale resolution the L2 winding doesn't carry. The finer archive is ==scale x the
@@ -69,7 +73,7 @@ int main(int argc,char**argv){
     size_t cap=(size_t)(zhi-zlo)*dy*dx; float*tmp=malloc((cap?cap:1)*sizeof(float)); size_t k=0;
     for(int z=zlo;z<zhi;z++)for(int y=0;y<dy;y++)for(int x=0;x<dx;x++){
       size_t p=((size_t)z*dy+y)*dx+x; if(!isfinite(w[p]))continue;
-      double rc=w[p]; if(spiral) rc+=atan2((double)y-cy,(double)x-cx)/TWO_PI; tmp[k++]=(float)rc; }
+      double rc=w[p]; if(spiral) rc+=wsign*atan2((double)y-cy,(double)x-cx)/TWO_PI; tmp[k++]=(float)rc; }
     qsort(tmp,k,sizeof(float),cmp_f32);
     wmin=k?tmp[(size_t)(0.010*k)]:0; wmax=k?tmp[(size_t)(0.995*(k-1))]:1; free(tmp);
   }
@@ -79,18 +83,33 @@ int main(int argc,char**argv){
   mca_handle*h=mca_open(ctarc); if(!h){ fprintf(stderr,"open arc %s fail\n",ctarc); return 1; }
 
   if(fine){
+    // verify the fine archive really is ~scale x the winding archive (the padding can differ by up to
+    // ~scale voxels, but a gross mismatch means the two are NOT a clean LOD pyramid -> CT sheared vs winding)
+    { mca_handle*wh=mca_open(arc); if(wh){ int wz,wy,wx,wnl; float wq; mca_handle_dims(wh,&wz,&wy,&wx,&wq,&wnl);
+        int cz,cyy,cxx,cnl; float cq; mca_handle_dims(h,&cz,&cyy,&cxx,&cq,&cnl);
+        int ez=abs(cz-scale*wz),ey=abs(cyy-scale*wy),ex=abs(cxx-scale*wx);
+        // small mismatch = benign high-index padding (origin still aligned, fine for in-bounds regions);
+        // a large mismatch means the two are not a clean pyramid and CT is sheared vs winding.
+        double rel=(double)(ez+ey+ex)/(scale*(double)(wz+wy+wx));
+        if(rel>0.05) fprintf(stderr,"*** FINE WARNING: %s dims %dx%dx%d != %dx %s %dx%dx%d (off z%d y%d x%d, %.1f%%) -- CT likely MISREGISTERED vs winding ***\n",ctarc,cz,cyy,cxx,scale,arc,wz,wy,wx,ez,ey,ex,100*rel);
+        else fprintf(stderr,"FINE dims check: %s %dx%dx%d ~= %dx %s %dx%dx%d (off z%d y%d x%d = end-padding, benign for in-bounds regions)\n",ctarc,cz,cyy,cxx,scale,arc,wz,wy,wx,ez,ey,ex);
+        mca_close(wh); } }
     int Fz0=(z0+za)*scale, Fy0=y0*scale, Fx0=x0*scale, Fdz=zn*scale, Fdy=dy*scale, Fdx=dx*scale;
     fprintf(stderr,"FINE render: CT %s scale %d, fine region z%d y%d x%d + %dx%dx%d -> %d cols x %d rows\n",
             ctarc,scale,Fz0,Fy0,Fx0,Fdz,Fdy,Fdx,UW,Fdz);
     u8*ct=mca_read(h,0,Fz0,Fy0,Fx0,Fdz,Fdy,Fdx); if(!ct){ fprintf(stderr,"fine CT read fail\n"); return 1; }
     double*acc=calloc((size_t)Fdz*UW,sizeof(double)); int*cnt=calloc((size_t)Fdz*UW,sizeof(int));
     // parallel over zf: each zf writes a disjoint output row [zf*UW,(zf+1)*UW) -> no atomics needed
+    // LOD half-voxel registration: a winding (L2) voxel center sits at fine coord scale*j+(scale-1)/2,
+    // so the fine voxel zf maps to winding index za+(zf-(scale-1)/2)/scale (was zf/scale -> ~0.5-voxel
+    // shift between CT and winding; negligible at L2 but real at ink scale).
+    const double hv=(scale-1)/2.0;
     #pragma omp parallel for schedule(static)
-    for(int zf=0;zf<Fdz;zf++){ double wlz=za+(double)zf/scale;
-      for(int yf=0;yf<Fdy;yf++){ double wly=(double)yf/scale;
-        for(int xf=0;xf<Fdx;xf++){ double wlx=(double)xf/scale;
+    for(int zf=0;zf<Fdz;zf++){ double wlz=za+((double)zf-hv)/scale;
+      for(int yf=0;yf<Fdy;yf++){ double wly=((double)yf-hv)/scale;
+        for(int xf=0;xf<Fdx;xf++){ double wlx=((double)xf-hv)/scale;
           double wv=wtrilin(w,dz,dy,dx,wlz,wly,wlx); if(!isfinite(wv))continue;
-          double rc=wv+atan2(wly-cy,wlx-cx)/TWO_PI;
+          double rc=wv+wsign*atan2(wly-cy,wlx-cx)/TWO_PI;
           int u=(int)((rc-wmin)*SAMP); if(u<0||u>=UW)continue;
           size_t o=(size_t)zf*UW+u; acc[o]+=ct[((size_t)zf*Fdy+yf)*Fdx+xf]; cnt[o]++; } } }
     u8*img=calloc((size_t)Fdz*UW,1);
@@ -106,7 +125,7 @@ int main(int argc,char**argv){
   double*acc=calloc((size_t)dz*UW,sizeof(double)); int*cnt=calloc((size_t)dz*UW,sizeof(int));
   for(int z=0;z<dz;z++)for(int y=0;y<dy;y++)for(int x=0;x<dx;x++){
     size_t p=((size_t)z*dy+y)*dx+x; float wv=w[p]; if(!isfinite(wv))continue;
-    double rc=wv; if(spiral) rc+=atan2((double)y-cy,(double)x-cx)/TWO_PI;
+    double rc=wv; if(spiral) rc+=wsign*atan2((double)y-cy,(double)x-cx)/TWO_PI;
     int u=(int)((rc-wmin)*SAMP); if(u<0||u>=UW)continue;
     size_t o=(size_t)z*UW+u; acc[o]+=ct[p]; cnt[o]++; }
   u8*img=calloc((size_t)dz*UW,1);
