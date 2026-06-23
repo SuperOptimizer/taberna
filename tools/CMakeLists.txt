@@ -141,6 +141,9 @@ target_link_libraries(mca_slice PRIVATE taberna_io)
 
 add_executable(unroll_wind unroll_wind.c)
 target_link_libraries(unroll_wind PRIVATE taberna_io m)
+if(OpenMP_C_FOUND)
+  target_link_libraries(unroll_wind PRIVATE OpenMP::OpenMP_C)
+endif()
 
 add_executable(air_trace air_trace.c)
 target_link_libraries(air_trace PRIVATE taberna_unwrap
