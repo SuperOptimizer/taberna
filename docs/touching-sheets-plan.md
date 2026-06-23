@@ -131,6 +131,29 @@ z3936 y718 x1580, 32×1024×1024, pitch 20, 11.1M material voxels):
   `pherc0332_L2.mca`, which holds native-res data for this ROI with the umbilicus at local (512,513),
   exactly reproducing the `dress2` setup.
 
+**Phase 3a (done, 2026-06-23) — `tools/wind_tv.c`: global weighted-TV winding regularizer. FIRST METHOD
+TO BEAT floor(W).** The research's "lower-friction entry" (continuous-max-flow / convex relaxation), built
+WITHOUT a from-scratch Boykov–Kolmogorov maxflow. Minimize `λ/2·‖u−W‖² + ∫ g·|∇u|` over material voxels
+(g = sheetness) by Chambolle–Pock primal-dual (matrix-free, 3D forward-grad/backward-div, σ=τ=1/√12).
+Where g is high (sheet interior) the TV term forces u FLAT → the whole sheet collapses to one level → the
+along-sheet flip is removed GLOBALLY (what no local mode-filter could do, because both halves of a flipped
+sheet are locally self-consistent); where g is low (gaps) u jumps ~1 to the next wrap; the data term anchors
+u to the winding so wraps don't collapse. Verified (small crop → full region): CP converges (RMS|u−W| 0.10–
+0.22 wraps), wrap COUNT preserved (31→31, no merge).
+- RESULT (along-sheet flip metric, the direct defect-1 measure): floor(W) 3.35% → TV λ0.50 2.68% (−20%)
+  → λ0.25 2.41% (−28%) → λ0.12 2.14% (−36%), consistent across sthr∈{.30,.45,.60}×step∈{1.5,3.0}. This is
+  the first relabeling that BEATS plain floor(W) — confirming the global-solve thesis (the 3b downstream
+  and 2a upstream lightweight attempts all tied or lost). Over-smoothing guard (distinct labels per radial
+  ray): 19.63 → 19.22 at λ0.25, a ~2% drop, much of which is spurious-flip removal (a flip splits one sheet
+  into 2 labels, inflating the count). Visual (touch-dense zoom): cleaner/longer single-color sheet runs,
+  no merging. Default λ=0.3 (effective, conservative on touch-merging).
+- SCOPE: fixes defect 1 (along-sheet flip), the pervasive one. Defect 2 (LEAKED touches, where W itself
+  failed to count the turn) is NOT yet fixed — W can't separate what it didn't resolve, and a data term
+  tied to W inherits that. NEXT increment: add the monotone-OUTWARD ordering constraint (Ishikawa level-
+  set / the radial-monotonicity of u) on top of this same CP solver — that's what forces the +1 through a
+  leaked touch even where W is flat. `wind_tv` is the new working labeler; `wind_label` floor(W) is the
+  fallback. Usage: `wind_tv ARC OUT lod z0 y0 x0 dz dy dx priorvol priorlod [λ=0.3] [niter] [zc] [gmin]`.
+
 ## Phase 1 — Winding-gated supervoxel merge (Family A; the actionable fix)
 
 Reuse `tools/svaff_seg.c` (SNIC supervoxels + per-supervoxel orientation + signed RAG + MWS). The wall
