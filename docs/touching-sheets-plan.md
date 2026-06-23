@@ -205,6 +205,22 @@ LOGISMOS MIN-SEPARATION constraint (∞-arcs enforcing a minimum wrap count / δ
 column) so a split is FORCED even where U is flat — that is what actually recovers a leaked wrap. The
 verified maxflow + the nested level-set scaffold are the infrastructure for it.
 
+**Phase 3b leak QUANTIFICATION (done, 2026-06-23) — `scripts/leak_metric.py`: defect 2 is a ~1% LONG TAIL,
+not a dominant defect. Reframes the whole touch-fix priority.** Built the measurement the plan never had:
+a LEAK = a continuous-material span ~one pitch long along the outward normal whose winding stays flat (the
+field failed to count the turn THROUGH a gapless fused touch) — distinct from a healthy boundary where an
+air gap interrupts the material path. Robust march detector (material-masked grad→smoothed normal, march
+2px steps to pitch requiring continuous material, leak if end-to-start dW<~0.5). On the L1 region (TV
+field): fused spans = 3.2% of material; LEAKS = 0.66% (dW<0.3) to 1.10% (dW<0.5) of ALL material; ~FLAT
+across radius (0.14% near-core → 1.25% outer, NOT concentrated in a hotspot); the field already counts the
+turn through 38% of fused spots. SO: after Phase 3a (`wind_tv`, which fixed the PERVASIVE along-sheet flip
+and gave a +73% sharper unroll), the residual touch-leak is a ~1% long tail. This is exactly why the hard
+grid cut reads as TV-equivalent on aggregate metrics — there is only ~1% to recover. CONCLUSION: the heavy
+LOGISMOS min-separation build is LOW-YIELD on accessible mid-scroll data; the verified maxflow + nested
+level-set scaffold (`wind_cut`) are BANKED for a genuinely high-fusion region (deep compressed core) if one
+later proves to need them. The high-value touch work — Phase 3a — is done and validated. Original plan
+assumption "touches are THE place the pipeline merges two wraps" is now quantified and downgraded.
+
 ## Phase 1 — Winding-gated supervoxel merge (Family A; the actionable fix)
 
 Reuse `tools/svaff_seg.c` (SNIC supervoxels + per-supervoxel orientation + signed RAG + MWS). The wall
