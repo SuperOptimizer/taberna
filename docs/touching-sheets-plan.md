@@ -154,6 +154,33 @@ u to the winding so wraps don't collapse. Verified (small crop → full region):
   leaked touch even where W is flat. `wind_tv` is the new working labeler; `wind_label` floor(W) is the
   fallback. Usage: `wind_tv ARC OUT lod z0 y0 x0 dz dy dx priorvol priorlod [λ=0.3] [niter] [zc] [gmin]`.
 
+**Phase 3b ordering (done, 2026-06-23) — soft min-slope ordering term: TESTED-NEGATIVE on L1; defect 2
+needs the HARD ordered-label cut.** Ran on the L1 export (finer than L2; full pyramid `pherc0332.mca`
+deleted as old-format. L1 touch region = 2× the L2 coords = z7872 y1436 x3160, pitch 40 — exports are
+consistent ×2 downsamples: trim origins L0(2560,3072,0)→L1(1280,1536,0)→L2(640,768,0)). First confirmed
+Phase 3a reproduces on L1: floor(W) flip 2.30% → TV 1.58% (−31%), matching L2. Then built the ordering
+increment in `wind_tv` (`order_mu>0`, default 0 = exact 3a): a one-sided MIN-SLOPE penalty `∂u/∂n ≥
+δ=1/pitch` along the smoothed-∇W outward normal `n = normalize(blur(∇W))` (smoothing keeps the direction
+defined THROUGH a leak by borrowing it from the leak's edges — avoiding BOTH the radial-ray trap and the
+flat-∇W-at-leak trap). Intent: force the +1 increment W missed across a fused touch.
+- RESULT: does NOT recover leaked/merged wraps. Broad threshold → fires everywhere TV softened the slope,
+  globally RE-STEEPENS u toward floor(W) (flip RISES 1.58→1.79%; distinct/ray rises but it's reintroduced
+  flips; RMS|u−W| falls). Severe (leak-only, δ·0.35) threshold → near no-op (flip +0.02, the TV-merged 31st
+  wrap NEVER recovered, labels stay 30). No setting gives the wanted signature (distinct UP + flip FLAT).
+- MECHANISM (why a soft term provably can't): splitting a GAPLESS fused touch is a discrete cut-PLACEMENT
+  decision — "a +1 must cross here, at the lowest-sheetness location within the fused span" — which a soft
+  continuous penalty cannot make. It smears the increment over the step or skips it; it cannot pin a sharp
+  boundary where there is no local low-sheetness gap. That is exactly the job of the hard ordered-label
+  min-cut: the ∞-arc ordering forces ≥1 increment across a column and the MIN-CUT places it at the lowest-
+  sheetness node. So this empirically confirms, from the solver side, that defect 2 needs the hard ordered-
+  label cut (Ishikawa/LOGISMOS) or the spiral fit — the soft relaxation is insufficient. The scaffolding
+  (smoothed outward-normal field = per-voxel column direction, masked trilinear, masked separable blur) is
+  KEPT default-OFF as reusable infra for that hard solver.
+- NET: `wind_tv` Phase 3a (weighted-TV, defect 1, −28–36%) is the working win. Defect 2 now has a precise,
+  evidence-backed spec: a BANDED hard ordered-label min-cut along the already-built smoothed-normal columns,
+  label boundaries at min-sheetness. That is the real next build — the Boykov–Kolmogorov/Ishikawa
+  construction, now MOTIVATED by a negative result rather than assumed.
+
 ## Phase 1 — Winding-gated supervoxel merge (Family A; the actionable fix)
 
 Reuse `tools/svaff_seg.c` (SNIC supervoxels + per-supervoxel orientation + signed RAG + MWS). The wall
