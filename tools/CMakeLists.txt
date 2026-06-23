@@ -140,7 +140,10 @@ add_executable(mca_slice mca_slice.c)
 target_link_libraries(mca_slice PRIVATE taberna_io)
 
 add_executable(wind_poisson wind_poisson.c)
-target_link_libraries(wind_poisson PRIVATE taberna_io taberna_annotate taberna_unwrap m)
+target_link_libraries(wind_poisson PRIVATE taberna_io taberna_annotate taberna_unwrap taberna_segmentation m)
+
+add_executable(polar_sheet polar_sheet.c)
+target_link_libraries(polar_sheet PRIVATE taberna_io taberna_annotate taberna_segmentation m)
 
 add_executable(unroll_wind unroll_wind.c)
 target_link_libraries(unroll_wind PRIVATE taberna_io m)
@@ -165,7 +168,7 @@ if(OpenMP_C_FOUND)
 endif()
 
 add_executable(sheet_sep3d sheet_sep3d.c)
-target_link_libraries(sheet_sep3d PRIVATE taberna_io taberna_eval taberna_annotate taberna_segmentation)
+target_link_libraries(sheet_sep3d PRIVATE taberna_io taberna_eval taberna_annotate taberna_segmentation fysics)
 if(OpenMP_C_FOUND)
   target_link_libraries(sheet_sep3d PRIVATE OpenMP::OpenMP_C)
 endif()

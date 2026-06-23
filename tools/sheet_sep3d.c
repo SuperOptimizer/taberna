@@ -46,6 +46,7 @@
 #include "eval/topo.h"
 #include "annotate/umbilicus.h"
 #include "segmentation/sheet_tensor.h"
+#include "fysics.h"
 
 typedef unsigned char u8; typedef unsigned int u32; typedef float f32;
 #define IDX(z,y,x) (((size_t)(z)*dy+(y))*dx+(x))
@@ -218,6 +219,41 @@ int main(int argc,char**argv){
 
   u8*v=mca_read(arc,lod,(int)z0,(int)y0,(int)x0,dz,dy,dx); if(!v){fprintf(stderr,"subvol read fail\n");return 1;}
   size_t nn=(size_t)dz*dy*dx;
+  // FYSICS PREPROCESSING (argv[31]=prep: 0 off, 1 denoise, 2 deconv+denoise; [32]=l0scale; [33]=epsmul).
+  // TESTED + does NOT help the detection goal (kept opt-in, default OFF, for rendering experiments):
+  // denoise REDUCES backward-switch only by MERGING sheets (count 40->28 at a known-good region; the
+  // backsw drop is an artifact of fewer sheets); deconv SEPARATES/finds more sheets (count 40->43) but
+  // RAISES backward-switch (67->87, sharpened edge noise). They pull opposite on both count AND switching
+  // -- no setting gives "same count, fewer switches". The ~67 backsw floor is physically-ambiguous narrow
+  // gaps, not preprocessing-fixable. The scale gate is BLIND to the merge (graph+crossing corrupt together
+  // -> both read the wrong merged count) -- only the trusted no-prep baseline catches it. Metadata for the
+  // deconv from data/opendata/PHerc0332/...zarr/metadata.json (78keV, delta/beta 1000, unsharp 1.2/coeff 4).
+  int prep=argc>31?atoi(argv[31]):0;        // 0=off, 1=denoise, 2=matched-deconv + denoise
+  double l0scale=argc>32?atof(argv[32]):4;  // archive downsample from L0 (L2=4, L1=2, L0=1): scales the unsharp
+  if(prep){
+    f32*vf=malloc(nn*sizeof(f32)),*o=malloc(nn*sizeof(f32)); for(size_t p=0;p<nn;p++) vf[p]=v[p];
+    if(prep>=2){
+      // matched-Wiener deconvolution -- inverts the reconstruction net blur (system PSF x nabu unsharp)
+      // using the REAL recon params from data/opendata/PHerc0332/...zarr/metadata.json (78keV, delta/beta
+      // 1000, unsharp sigma 1.2 / coeff 4.0 at L0), scaled to this archive's resolution -> sharper sheet
+      // edges = more separable touches. Auto-tikhonov keeps it noise-safe.
+      fy_physics ph={0}; ph.delta_beta=1000.0; ph.energy_kev=78.0; ph.distance_mm=220.0;
+      ph.pixel_um=2.399*l0scale; ph.unsharp_sigma=1.2/l0scale; ph.unsharp_coeff=4.0; ph.psf_sigma_vox=1.0;
+      if(fy_deconvolve_matched(vf,o,dz,dy,dx,&ph,0.0)==0){ memcpy(vf,o,nn*sizeof(f32));
+        fprintf(stderr,"fysics deconv (matched-Wiener, unsharp_sig=%.2f)\n",ph.unsharp_sigma); }
+      else fprintf(stderr,"WARN: deconv failed\n");
+    }
+    fy_noise_model nm; fy_estimate_noise(vf,dz,dy,dx,5,10.0,100.0,&nm);
+    // GENTLE: the auto eps (~noise_ref^2*9) over-smooths and MERGES adjacent sheets (verified: count
+    // 40->28 at a known-good region). argv[33]=epsmul scales it down (default 0.1); radius 1 keeps the
+    // filter narrower than the inter-sheet gap. Edge-preserving denoise must NOT cross sheet boundaries.
+    double epsmul=argc>33?atof(argv[33]):0.1; double eps=fy_guided_eps_for_noise(nm.noise_ref)*epsmul;
+    if(epsmul>0) fy_guided_denoise(vf,o,dz,dy,dx,1,eps);
+    else memcpy(o,vf,nn*sizeof(f32));   // epsmul<=0: skip denoise (test deconv-alone)
+    for(size_t p=0;p<nn;p++){ double x=o[p]; v[p]=(u8)(x<0?0:x>255?255:x); }
+    free(vf); free(o);
+    fprintf(stderr,"fysics preprocessing prep=%d (denoise eps=%.3f, noise_ref=%.2f)\n",prep,eps,nm.noise_ref);
+  }
   int athr=air_threshold(v,nn); fprintf(stderr,"bimodal air threshold v<%d\n",athr); PHASE("read+threshold");
 
   // smoothed vs (per-slice 2D box, 2 iters), air->0
