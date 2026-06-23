@@ -172,3 +172,9 @@ target_link_libraries(sheet_sep3d PRIVATE taberna_io taberna_eval taberna_annota
 if(OpenMP_C_FOUND)
   target_link_libraries(sheet_sep3d PRIVATE OpenMP::OpenMP_C)
 endif()
+
+add_executable(affinity_seg affinity_seg.c)
+target_link_libraries(affinity_seg PRIVATE taberna_io taberna_segmentation m)
+
+add_executable(snic_view snic_view.c)
+target_link_libraries(snic_view PRIVATE taberna_io taberna_segmentation m)
