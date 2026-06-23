@@ -202,3 +202,6 @@ target_link_libraries(surf_pred PRIVATE taberna_io taberna_segmentation fysics m
 
 add_executable(trace_mca trace_mca.c)
 target_link_libraries(trace_mca PRIVATE taberna_io taberna_segmentation fysics m)
+
+add_executable(wind_tifxyz wind_tifxyz.c)
+target_link_libraries(wind_tifxyz PRIVATE taberna_io taberna_annotate m)
