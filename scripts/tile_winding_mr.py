@@ -89,13 +89,18 @@ def main():
                 continue
             d = aa[m] - bb[m]; md = float(np.median(d))
             seams.append((f"{iz},{iy},{ix}->{nb[0]},{nb[1]},{nb[2]}", md,
-                          float(np.mean(np.abs(d - md) < 0.25)), float((d - md).std()), int(m.sum())))
-    print("\nseams (median-offset, agree<0.25, tail-std, voxels):")
+                          float(np.mean(np.abs(d - md) < 0.25)),   # median-subtracted
+                          float(np.mean(np.abs(d) < 0.25)),        # RAW (no offset removed)
+                          float((d - md).std()), int(m.sum())))
+    print("\nseams (offset, agree<0.25 [raw / median-sub], tail-std, voxels):")
     for s_ in seams:
-        print(f"  {s_[0]}: off={s_[1]:+.2f} agree={s_[2]:.3f} tailstd={s_[3]:.2f} n={s_[4]}")
+        print(f"  {s_[0]}: off={s_[1]:+.2f} agree={s_[3]:.3f}/{s_[2]:.3f} tailstd={s_[4]:.2f} n={s_[5]}")
     if seams:
-        print(f"MEAN seam agreement <0.25 wrap = {np.mean([s_[2] for s_ in seams]):.3f}  "
-              f"mean|offset|={np.mean([abs(s_[1]) for s_ in seams]):.3f}")
+        print(f"MEAN seam agreement <0.25: raw={np.mean([s_[3] for s_ in seams]):.3f}  "
+              f"median-sub={np.mean([s_[2] for s_ in seams]):.3f}  mean|offset|={np.mean([abs(s_[1]) for s_ in seams]):.3f}")
+    # NOTE (review C1): with GLAM>0 every tile is pulled to the SAME coarse field, so this agreement
+    # measures prior coupling, not independent correctness. The honest tiling number is the GLAM=0 run
+    # (set GLAM='0' below); sheet_sep3d's '3D prior-departure: mean|wd-cwv|' reports how coupled each tile is.
     # --- 4) merge: direct average over overlaps (offsets are ~0) ---
     Z0 = min(o[0] for _, o in tiles.values()); Y0 = min(o[1] for _, o in tiles.values()); X0 = min(o[2] for _, o in tiles.values())
     Z1 = max(o[0]+v.shape[0] for v, o in tiles.values())

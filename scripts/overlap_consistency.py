@@ -33,7 +33,13 @@ def main():
     off = np.median(d); r = d - off
     print(f"overlap world z[{z0},{z1}) y[{y0},{y1}) x[{x0},{x1}); {m.sum()} shared material voxels")
     print(f"  global offset={off:.2f} wraps")
-    print(f"  agree <0.25 wrap: {np.mean(np.abs(r)<0.25):.3f}   <0.5 wrap: {np.mean(np.abs(r)<0.5):.3f}   tail-std={r.std():.2f}")
+    # RAW agreement (no median removed) -- the median subtraction below absorbs ANY constant additive
+    # bias including a uniform integer-wrap mislabel, so report raw FIRST. A large |offset| with high raw
+    # disagreement but high median-subtracted agreement = the two crops differ by a constant wrap count.
+    print(f"  RAW (no-median): agree <0.25: {np.mean(np.abs(d)<0.25):.3f}   <0.5: {np.mean(np.abs(d)<0.5):.3f}   |offset|={abs(off):.2f} wraps")
+    print(f"  median-subtracted: agree <0.25 wrap: {np.mean(np.abs(r)<0.25):.3f}   <0.5 wrap: {np.mean(np.abs(r)<0.5):.3f}   tail-std={r.std():.2f}")
+    # WARNING: under a shared coarse prior (GLAM) both crops are pulled to the same field, so this metric
+    # measures prior coupling, not independent data consistency. Only trust it on INDEPENDENTLY-solved crops.
     # split out the umbilicus core of the overlap region (its own centroid of shared material)
     zz, yy, xx = np.where(m)
     cy, cx = yy.mean(), xx.mean(); rad = np.hypot(yy-cy, xx-cx); rmax = rad.max()

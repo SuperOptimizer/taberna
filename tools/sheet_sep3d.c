@@ -698,7 +698,7 @@ int main(int argc,char**argv){
   #undef MAT
   #undef INPW
   #undef TANW
-  if(cwv){ free(cwv); cwv=NULL; }
+  // (cwv kept alive for the prior-departure diagnostic below; freed at program end)
   // POST-SOLVE Z-MEDIAN: firmly-held per-slice anchors bake a whole-slice integer offset that
   // the local z-diffusion can't overcome (it only blends boundaries). A slice offset by +1 sits
   // between z-neighbours at 0, so a robust z-median over +/-zmedw removes the integer-jump
@@ -851,7 +851,18 @@ int main(int argc,char**argv){
       if(r<Rmax*0.33){ si+=wd[p];ni++; } else if(r>Rmax*0.66){ so+=wd[p];no++; } }
     double climb=(no?so/no:0)-(ni?si/ni:0);
     printf("3D fill coverage: outer-inner winding climb=%.1f wraps (should be >>0; flat=collapsed fill), unfilled |w|<0.5 frac=%.2f\n",
-      climb, nmat?(double)nflat/nmat:0); }
+      climb, nmat?(double)nflat/nmat:0);
+    // PRIOR-DEPARTURE (review C1): when a coarse prior + GLAM are active, the output is partly the coarse
+    // field everywhere. Report how far the final field departs from it -- if mean|wd-cwv| ~ 0 the dense
+    // field is essentially the upsampled coarse field, so per-tile metrics (climb, backward-switch) and
+    // seam agreement are coarse-ECHOES, NOT independent evidence. A healthy fine solve departs by a real
+    // fraction of a wrap where its data disagrees with the coarse interpolation.
+    if(haveprior && cwv){ double sd=0,sd2=0; long nd=0;
+      for(int z=0;z<dz;z++)for(int y=0;y<dy;y++)for(int x=0;x<dx;x++){ size_t p=IDX(z,y,x); if(v[p]<athr||bar[p]||!isfinite(cwv[p]))continue;
+        double e=wd[p]-cwv[p]; sd+=fabs(e); sd2+=e*e; nd++; }
+      double mad=nd?sd/nd:0, rms=nd?sqrt(sd2/nd):0;
+      printf("3D prior-departure: mean|wd-cwv|=%.3f wraps, rms=%.3f (near 0 => output is the coarse field echoed; seam agreement is then NOT independent)\n",mad,rms); }
+  }
   // Z-COHERENCE (the whole point of a 3D solve): the radial winding profile should be the
   // SAME at every z. Compute the per-z profile and report the std across z per radius bin.
   // Low = the winding number is consistent through the volume (a coherent 3D field).
@@ -934,5 +945,6 @@ int main(int argc,char**argv){
       fprintf(stderr,"wrote %s_unroll_arc.pgm (arc-length unroll %dx%d; horiz=physical arc length, aspect-correct)\n",base,UW,dz); }
     free(acc); }
   PHASE("output");
+  if(cwv) free(cwv);
   return 0;
 }
