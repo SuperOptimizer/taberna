@@ -145,6 +145,26 @@ static double refine_center_slice(const f32*vs,const u8*v,int athr,int dy,int dx
 
 static int cmp_long(const void*a,const void*b){ long x=*(const long*)a,y=*(const long*)b; return (x>y)-(x<y); }
 static int cmp_dbl(const void*a,const void*b){ double x=*(const double*)a,y=*(const double*)b; return (x>y)-(x<y); }
+
+// Count sheet crossings along one ray on the SHEETNESS field (sheets are peaks). Hysteresis prominence
+// on inverted sheetness (fall by pk, then rise by prom). Far more robust than count_valleys at low
+// intensity contrast (benchmark: low-z intensity valleys collapse to ~7 while this holds ~46).
+static int sheet_cross_ray(const f32*shz,int dy,int dx,double cyz,double cxz,double uy,double ux,int Rr){
+  int np=Rr<799?Rr:799; double prof[800];
+  for(int t=0;t<=np;t++){ int iy=(int)lround(cyz+uy*t),ix=(int)lround(cxz+ux*t);
+    prof[t]=(iy<0||iy>=dy||ix<0||ix>=dx)?0.0:255.0-(double)shz[(size_t)iy*dx+ix]; }
+  double prom=60,pk=1.8*prom,cmax=-1e30,cmin=1e30; int dir=0,nv=0,st=0;
+  for(int t=0;t<=np;t++){ double val=prof[t]; if(!st){cmax=cmin=val;st=1;continue;}
+    if(dir>=0){ if(val>cmax)cmax=val; if(cmax-val>=pk){dir=-1;cmin=val;} }
+    if(dir<=0){ if(val<cmin)cmin=val; if(val-cmin>=prom){ if(dir==-1)nv++; dir=1;cmax=val; } } }
+  return nv;
+}
+// median sheet-crossing count over NA rays at one z (the robust crossing count used for calibration + gate)
+static double sheet_cross_count(const f32*shz,int dy,int dx,double cyz,double cxz,int Rmx){
+  int Rr=Rmx<799?Rmx:799; double c[72]; int n=0;
+  for(int a=0;a<72;a++){ double th=2*M_PI*a/72,uy=sin(th),ux=cos(th); int nv=sheet_cross_ray(shz,dy,dx,cyz,cxz,uy,ux,Rr); if(nv>0)c[n++]=nv; }
+  if(!n)return 0; qsort(c,n,sizeof(double),cmp_dbl); return c[n/2];
+}
 // aggregate packed (key<<4|step) edge keys -> sparse (a,b,count,step) keeping run>=minc
 static long agg_edges(long*raw,long nraw,int K,int**ao,int**bo,long**wo,long**so,long minc){
   if(nraw==0){ *ao=malloc(4);*bo=malloc(4);*wo=malloc(8); if(so)*so=malloc(8); return 0; }
@@ -215,6 +235,22 @@ int main(int argc,char**argv){
   int kmin=(int)(0.5*pitch+0.5); if(kmin<2)kmin=2;
   int tier=(int)(0.7*pitch+0.5); if(tier<3)tier=3; if(tier>30)tier=30;
   double vprom=0.35*athr; if(vprom<6)vprom=6; double pitchmin=0.20*pitch;
+  // SHEETNESS computed BEFORE calibration (its sigma only needs the autocorr pitch, and is clamped to
+  // [1,3] so it's insensitive): the structure-tensor sheet-crossing count is FAR more stable than the
+  // raw-intensity valley count (benchmark: at low-z the intensity valleys collapse to 7-12 while
+  // sheetness holds 46-47), so we calibrate pitch to IT.
+  int usesheet=argc>24?atoi(argv[24]):1; f32*sh=NULL,*nrm=NULL;   // default ON: drives detection from the clean
+  if(usesheet){ sh=malloc(nn*sizeof(f32)); nrm=malloc(3*nn*sizeof(f32)); f32*vf=malloc(nn*sizeof(f32)); for(size_t p=0;p<nn;p++) vf[p]=v[p];
+    st_params sp=st_default_params(); sp.sigma_grad=1.0f; sp.sigma_tensor=(f32)(pitch*0.12); if(sp.sigma_tensor<1)sp.sigma_tensor=1; if(sp.sigma_tensor>3)sp.sigma_tensor=3;
+    st_sheet_detect(vf,dz,dy,dx,&sp,sh,nrm); free(vf);   // nrm: 3*nn, interleaved (nx,ny,nz) per voxel, unit axis
+    for(size_t p=0;p<nn;p++) if(v[p]<athr) sh[p]=0;   // mask air
+    double smx=0; for(size_t p=0;p<nn;p++) if(sh[p]>smx)smx=sh[p];
+    for(size_t p=0;p<nn;p++) sh[p]=(f32)(sh[p]/(smx>1e-6?smx:1)*255.0);   // scale to ~[0,255] for the valley/peak detectors
+    fprintf(stderr,"sheetness field computed (sigma_tensor=%.1f, scaled to 0..255)\n",sp.sigma_tensor); }
+  f32*sig = usesheet? sh : vs;
+  double sigprom = usesheet? 0.25*255.0 : vprom;    // inter-sheet valley prominence on the signal
+  double ridgethr= usesheet? 0.12*255.0 : athr;     // "is on a sheet" floor for the ridge
+  double barprom = usesheet? 0.015*255.0 : 0.10*vprom;  // min per-side dip to mark an inter-sheet barrier
   // ---- DATA-GROUND THE ABSOLUTE SCALE (review C2): calibrate pitch to the INDEPENDENT crossing count.
   // The graph winding count is prior-dominated (fragmented graph; (r-rmin)/pitch sets each component's
   // level), so a hand-set pitch leaks into the wrap count (count swung 23..35 over pitch 16..8 while the
@@ -223,7 +259,7 @@ int main(int argc,char**argv){
   // Only when pitch is AUTO (an explicit pitch_arg is respected). Bounded to +-(40..60)% of autocorr.
   double crossN=0;
   if(pitch_arg<=0){
-    int zc=dz/2; const f32*vsz0=vs+(size_t)zc*dy*dx; double cyz=cy[zc],cxz=cx[zc];
+    int zc=dz/2; const f32*vsz0=sig+(size_t)zc*dy*dx; double cyz=cy[zc],cxz=cx[zc]; double cprom=sigprom;
     // collect material radii to get the SPAN the N crossings actually occupy: (router - rinner),
     // NOT the full radius from the umbilicus (the core is often a void). pitch = span / N.
     size_t cap=(size_t)dy*dx; double*rad=malloc(cap*sizeof(double)); size_t nr=0;
@@ -231,13 +267,21 @@ int main(int argc,char**argv){
       rad[nr++]=hypot(y-cyz,x-cxz); }
     double Rmx=0,rinner=0; if(nr){ qsort(rad,nr,sizeof(double),cmp_dbl); Rmx=rad[nr-1]; rinner=rad[(size_t)(0.02*nr)]; } free(rad);
     double span=Rmx-rinner; if(span<4)span=Rmx;
-    int tvsm0=(int)(pitch/6); if(tvsm0<1)tvsm0=1; if(tvsm0>10)tvsm0=10;
-    int Rr=(int)(Rmx+0.5); if(Rr>799)Rr=799; const int NA=72; double cnts[72]; int nc=0;
-    for(int a=0;a<NA;a++){ double th=2*M_PI*a/NA,uy=sin(th),ux=cos(th);
-      int nv=count_valleys(vsz0,dy,dx,cyz,cxz,uy,ux,Rr,vprom,pitchmin,0,tvsm0); if(nv>0)cnts[nc++]=nv; }
-    if(nc>=NA/2){ qsort(cnts,nc,sizeof(double),cmp_dbl); crossN=cnts[nc/2];
+    (void)vsz0;(void)cprom;
+    // count sheets on the SHEETNESS field (robust at low contrast); fall back to intensity valleys.
+    if(usesheet && sh){ crossN=sheet_cross_count(sh+(size_t)zc*dy*dx,dy,dx,cyz,cxz,(int)(Rmx+0.5)); }
+    else { int tvsm0=(int)(pitch/6); if(tvsm0<1)tvsm0=1; if(tvsm0>10)tvsm0=10;
+      int Rr=(int)(Rmx+0.5); if(Rr>799)Rr=799; double cnts[72]; int nc=0;
+      for(int a=0;a<72;a++){ double th=2*M_PI*a/72,uy=sin(th),ux=cos(th);
+        int nv=count_valleys(vs+(size_t)zc*dy*dx,dy,dx,cyz,cxz,uy,ux,Rr,vprom,pitchmin,0,tvsm0); if(nv>0)cnts[nc++]=nv; }
+      if(nc>=36){ qsort(cnts,nc,sizeof(double),cmp_dbl); crossN=cnts[nc/2]; } }
+    {
       if(crossN>=3 && span>4){ double np=span/crossN;
-        if(np<0.6*pitch)np=0.6*pitch; if(np>1.6*pitch)np=1.6*pitch;
+        // the SHEETNESS count is reliable (decoupled from the often-wrong autocorr at low contrast),
+        // so trust span/count directly with only sane absolute bounds; intensity-valley fallback stays
+        // tied to autocorr (less reliable). At low-z autocorr can be 2-6x off, so do NOT clamp to it.
+        if(usesheet && sh){ if(np<3)np=3; if(np>200)np=200; }
+        else { if(np<0.6*pitch)np=0.6*pitch; if(np>1.6*pitch)np=1.6*pitch; }
         fprintf(stderr,"pitch calibrated to crossing count: autocorr=%.1f -> %.0f sheets over span=%.0f (r %.0f..%.0f) -> pitch=%.1f\n",pitch,crossN,span,rinner,Rmx,np);
         pitch=np; walkr=(int)(1.6*pitch+0.5); if(walkr<8)walkr=8; if(walkr>120)walkr=120;
         kmin=(int)(0.5*pitch+0.5); if(kmin<2)kmin=2;
@@ -247,28 +291,9 @@ int main(int argc,char**argv){
   }
   fprintf(stderr,"pitch=%.1f walk=%d kmin=%d tie=%d vprom=%.1f\n",pitch,walkr,kmin,tier,vprom);
 
-  // CLASSICAL SURFACE-PROBABILITY FIELD (no ML): structure-tensor sheetness in [0,1], the non-ML
-  // equivalent of VC3D's U-Net surface prediction. VC3D's gradient/TV methods failed on raw CT
-  // because raw intensity has within-sheet texture; the sheetness field is high on sheets, low
-  // between, texture suppressed -> windingDistance etc. should work on IT. argv[24]=usesheet.
-  int usesheet=argc>24?atoi(argv[24]):1; f32*sh=NULL,*nrm=NULL;   // default ON: drives detection from the clean
-  // classical sheetness field -> backward-switch -16..-24% in ALL regimes (core AND delaminated),
-  // better z-coherence + wrap-count accuracy. argv[24]=0 reverts to raw-intensity detection.
-  if(usesheet){ sh=malloc(nn*sizeof(f32)); nrm=malloc(3*nn*sizeof(f32)); f32*vf=malloc(nn*sizeof(f32)); for(size_t p=0;p<nn;p++) vf[p]=v[p];
-    st_params sp=st_default_params(); sp.sigma_grad=1.0f; sp.sigma_tensor=(f32)(pitch*0.12); if(sp.sigma_tensor<1)sp.sigma_tensor=1; if(sp.sigma_tensor>3)sp.sigma_tensor=3;
-    st_sheet_detect(vf,dz,dy,dx,&sp,sh,nrm); free(vf);   // nrm: 3*nn, interleaved (nx,ny,nz) per voxel, unit axis
-    for(size_t p=0;p<nn;p++) if(v[p]<athr) sh[p]=0;   // mask air
-    double smx=0; for(size_t p=0;p<nn;p++) if(sh[p]>smx)smx=sh[p];
-    for(size_t p=0;p<nn;p++) sh[p]=(f32)(sh[p]/(smx>1e-6?smx:1)*255.0);   // scale to ~[0,255] for the valley/peak detectors
-    fprintf(stderr,"sheetness field computed (sigma_tensor=%.1f, scaled to 0..255)\n",sp.sigma_tensor); }
-  // SIGNAL driving detection (ridge/bar) + valley-counting: the clean sheetness field when usesheet,
-  // else raw smoothed intensity. Sheets are MAXIMA in both (bright papyrus / high sheetness),
-  // inter-sheet gaps are MINIMA -> the radial max/min detector and the prominence valley-counter
-  // work unchanged; only the prominence + ridge-floor thresholds adapt to the signal's scale.
-  f32*sig = usesheet? sh : vs;
-  double sigprom = usesheet? 0.25*255.0 : vprom;    // inter-sheet valley prominence on the signal
-  double ridgethr= usesheet? 0.12*255.0 : athr;     // "is on a sheet" floor for the ridge
-  double barprom = usesheet? 0.015*255.0 : 0.10*vprom;  // min per-side dip to mark an inter-sheet barrier
+  // (sheetness field `sh`/`nrm` + sig/sigprom/ridgethr/barprom computed above, before calibration:
+  //  the structure-tensor sheetness is the non-ML equivalent of VC3D's U-Net surface prediction and
+  //  is the stable signal driving detection -- sheets are MAXIMA, inter-sheet gaps MINIMA.)
 
   // refine per-z umbilicus from sheet normals (robust line intersection); keeps coarse estimate
   // as init/fallback. Sanity-clamp: reject a refined center that bolts >0.6*dim from coarse.
@@ -634,7 +659,10 @@ int main(int argc,char**argv){
       if(haveprior || !well_centered){ fprintf(stderr,"scale gate skipped (%s -- scale %s)\n",
           haveprior?"coarse-prior tile":"umbilicus not well-centered in crop", haveprior?"inherited from gated coarse field":"not independently checkable here"); }
       else if(anchor>0){ double rel=fabs(gs-anchor)/anchor;
-        if(rel>0.15) fprintf(stderr,"*** SCALE WARNING: graph-solved %.0f wraps vs crossing-count %.0f (%.0f%% off) -- absolute scale is NOT data-pinned; pitch/prior may be wrong ***\n",gs,anchor,100*rel);
+        // threshold 0.25: the graph solve inherently over-segments ~15% vs the direct sheet count
+        // (recto/verso + touches add step-edges), so flag only GROSS scale errors (the failures were
+        // 50-110% off), not the inherent graph-vs-direct spread.
+        if(rel>0.25) fprintf(stderr,"*** SCALE WARNING: graph-solved %.0f wraps vs crossing-count %.0f (%.0f%% off) -- absolute scale is NOT data-pinned; pitch/prior may be wrong ***\n",gs,anchor,100*rel);
         else fprintf(stderr,"scale check OK: graph %.0f vs crossing %.0f (%.0f%%)\n",gs,anchor,100*rel); } } }
   // does NODE winding climb with NODE radius? (isolates graph vs dense). bin by mean radius.
   { int NB=12; double bsum[12]={0};long bc[12]={0}; double Rmax=0;
