@@ -198,4 +198,4 @@ add_executable(tifxyz tifxyz.c)
 target_link_libraries(tifxyz PRIVATE taberna_io m)
 
 add_executable(surf_pred surf_pred.c)
-target_link_libraries(surf_pred PRIVATE taberna_io taberna_segmentation m)
+target_link_libraries(surf_pred PRIVATE taberna_io taberna_segmentation fysics m)
