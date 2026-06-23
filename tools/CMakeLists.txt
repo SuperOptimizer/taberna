@@ -139,6 +139,9 @@ target_link_libraries(wind_diag PRIVATE taberna_segmentation
 add_executable(mca_slice mca_slice.c)
 target_link_libraries(mca_slice PRIVATE taberna_io)
 
+add_executable(wind_poisson wind_poisson.c)
+target_link_libraries(wind_poisson PRIVATE taberna_io taberna_annotate taberna_unwrap m)
+
 add_executable(unroll_wind unroll_wind.c)
 target_link_libraries(unroll_wind PRIVATE taberna_io m)
 if(OpenMP_C_FOUND)
