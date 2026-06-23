@@ -229,6 +229,12 @@ int main(int argc,char**argv){
     fprintf(stderr,"umbilicus refined from normals: %d/%d slices, mean line-RMS=%.2f, center z0=(%.0f,%.0f) zmid=(%.0f,%.0f)\n",
       nref,dz,nref?mr/nref:0,cy[0],cx[0],cy[dz/2],cx[dz/2]);
     free(ny0);free(nx0); }
+  // CENTER-STABILITY perturbation (argv[26]): deliberately shift the umbilicus by N px in x AFTER
+  // refinement, so a driver can re-solve and measure how much the winding drifts. A trustworthy
+  // pipeline is insensitive to a few-px center error -> small drift. Applied here so detection +
+  // solve all see the perturbed center. 0 = no perturbation.
+  double cxoff=argc>26?atof(argv[26]):0.0;
+  if(cxoff!=0){ for(int z=0;z<dz;z++) cx[z]+=cxoff; fprintf(stderr,"center perturbed: cx += %.1f px\n",cxoff); }
 
   // windingDistance calibration: TV (gradient integral) accrued over one wrap. Sample radial
   // segments of length `pitch` at many material points (mid-z) and take the median TV -> the
