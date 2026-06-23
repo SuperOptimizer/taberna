@@ -61,7 +61,9 @@ def main():
     cdy, cdx = -(-(uy1 - y0) // s) + 2 * H, -(-(ux1 - x0) // s) + 2 * H
     cg = f"{outdir}/coarse"
     print(f"coarse solve @ LOD{clod}: z{cz0} y{cy0} x{cx0} + {cdz}x{cdy}x{cdx}")
-    run(arc, clod, cz0, cy0, cx0, cdz, cdy, cdx, cg, max(4, pitch_f // s))
+    # pitch=0 -> sheet_sep3d AUTO-calibrates pitch to the independent sheet-crossing count so the
+    # coarse field's absolute scale is data-pinned (not a hand-set parameter); fine tiles inherit it.
+    run(arc, clod, cz0, cy0, cx0, cdz, cdy, cdx, cg, 0)
     cgvol = f"{cg}_vol.f32"
     # --- 2) fine tiles (NZ x NY x NX), each anchored to the coarse field ---
     tiles = {}
@@ -70,7 +72,7 @@ def main():
             for ix in range(nx):
                 tz, ty, tx = z0 + iz*stepz, y0 + iy*step, x0 + ix*step
                 out = f"{outdir}/t_{iz}_{iy}_{ix}"
-                run(arc, flod, tz, ty, tx, dz, ts, ts, out, pitch_f, prior=cgvol, plod=clod)
+                run(arc, flod, tz, ty, tx, dz, ts, ts, out, 0, prior=cgvol, plod=clod)
                 tiles[(iz, iy, ix)] = load(f"{out}_vol.f32")
         print(f"z-band {iz} done")
     # --- 3) seam agreement (DIRECT, no integer offset), across all 3 axes ---

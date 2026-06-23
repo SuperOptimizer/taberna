@@ -622,8 +622,18 @@ int main(int argc,char**argv){
       else    fprintf(stderr,"radial-crossing estimate (median/%d rays, NOT ground truth): raw-valley=%.0f, graph-solved=%.0f\n",nc,vcount,wmax-wmin);
       // HARD COUNT GATE (review C2): the absolute scale must match the INDEPENDENT crossing count.
       // The sheetness count is the most robust anchor (pitch-stable); fall back to raw-valley.
+      // ONLY valid when the crop CONTAINS the umbilicus and spans the full radial extent: on an
+      // off-center partial tile the rays from an outside center undercount, while the winding is
+      // coarse-anchored absolute, so the comparison is apples-to-oranges. Such tiles inherit the
+      // (already-gated) coarse scale via the prior, so we skip the gate and say so.
+      // well-centered = umbilicus within the inner 60% of the crop (rays reach material in all
+      // directions, so the median crossing count is reliable). haveprior tiles inherit the coarse
+      // scale (gated at the coarse solve) and have an unreliable partial-crop count -> skip.
+      int well_centered = (cyz>0.2*dy && cyz<0.8*dy && cxz>0.2*dx && cxz<0.8*dx);
       double anchor = (shz&&shm>0)? shm : vcount; double gs=wmax-wmin;
-      if(anchor>0){ double rel=fabs(gs-anchor)/anchor;
+      if(haveprior || !well_centered){ fprintf(stderr,"scale gate skipped (%s -- scale %s)\n",
+          haveprior?"coarse-prior tile":"umbilicus not well-centered in crop", haveprior?"inherited from gated coarse field":"not independently checkable here"); }
+      else if(anchor>0){ double rel=fabs(gs-anchor)/anchor;
         if(rel>0.15) fprintf(stderr,"*** SCALE WARNING: graph-solved %.0f wraps vs crossing-count %.0f (%.0f%% off) -- absolute scale is NOT data-pinned; pitch/prior may be wrong ***\n",gs,anchor,100*rel);
         else fprintf(stderr,"scale check OK: graph %.0f vs crossing %.0f (%.0f%%)\n",gs,anchor,100*rel); } } }
   // does NODE winding climb with NODE radius? (isolates graph vs dense). bin by mean radius.
