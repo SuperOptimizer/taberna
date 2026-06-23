@@ -114,3 +114,55 @@ int sheet_trace(const f32 *vol, int nz, int ny, int nx, const trace_params *pp, 
   free(sheet);free(normal);free(visited);free(q);
   return nsheets;
 }
+
+/* ---- labeled variant: identical front growth, paints a per-front s32 id instead of a union ---- */
+static void set_vox_lab(s32 *o,int nz,int ny,int nx,int z,int y,int x,s32 id){ size_t nynx=(size_t)ny*nx;
+  if(z>=0&&z<nz&&y>=0&&y<ny&&x>=0&&x<nx) o[IDX(z,y,x)]=id; }
+static void draw_line_lab(s32 *o,int nz,int ny,int nx, f32 z0,f32 y0,f32 x0,f32 z1,f32 y1,f32 x1,s32 id){
+  f32 dz=z1-z0,dy=y1-y0,dx=x1-x0; f32 L=fabsf(dz); if(fabsf(dy)>L)L=fabsf(dy); if(fabsf(dx)>L)L=fabsf(dx);
+  int m=(int)L+1; for(int i=0;i<=m;i++){f32 t=m?(f32)i/m:0; set_vox_lab(o,nz,ny,nx,(int)lroundf(z0+t*dz),(int)lroundf(y0+t*dy),(int)lroundf(x0+t*dx),id);}
+}
+int sheet_trace_lab(const f32 *vol, int nz, int ny, int nx, const trace_params *pp, s32 *lab){
+  trace_params p = pp?*pp:trace_default_params();
+  size_t nynx=(size_t)ny*nx, N=(size_t)nz*nynx;
+  for(size_t i=0;i<N;i++) lab[i]=0;
+  f32 *sheet=malloc(N*sizeof(f32)), *normal=malloc(3*N*sizeof(f32));
+  if(!sheet||!normal){free(sheet);free(normal);return -1;}
+  if(st_sheet_detect(vol,nz,ny,nx,&p.st,sheet,normal)!=0){free(sheet);free(normal);return -1;}
+  u8 *visited=calloc(N,1); frontpt *q=malloc(N*sizeof(frontpt)); int nsheets=0;
+  for (int sz=0; sz<nz; sz++) for(int sy=0; sy<ny; sy++) for(int sx=0; sx<nx; sx++){
+    size_t si=IDX(sz,sy,sx);
+    if (visited[si] || sheet[si] < p.seed_thresh || vol[si] < p.i_min) continue;
+    s32 id=nsheets+1; size_t head=0, tail=0;
+    f32 n0[3]; normal_at(normal,nz,ny,nx,sz,sy,sx,n0);
+    f32 fz=sz,fy=sy,fx=sx;
+    if(!snap(vol,sheet,nz,ny,nx,p.snap_radius,p.i_min,p.seed_thresh,n0,&fz,&fy,&fx)) { visited[si]=1; continue; }
+    { int wz=(int)lroundf(fz),wy=(int)lroundf(fy),wx=(int)lroundf(fx);
+      if(wz<0||wz>=nz||wy<0||wy>=ny||wx<0||wx>=nx){ visited[si]=1; continue; }
+      size_t wi=IDX(wz,wy,wx); visited[wi]=1; lab[wi]=id; q[tail++]=(frontpt){fz,fy,fx,n0[0],n0[1],n0[2]}; }
+    while(head<tail){
+      frontpt cp=q[head++]; f32 n[3]={cp.nz,cp.ny,cp.nx};
+      f32 a[3]={1,0,0}; if(fabsf(n[0])>0.9f){a[0]=0;a[1]=1;}
+      f32 t1[3]={a[1]*n[2]-a[2]*n[1], a[2]*n[0]-a[0]*n[2], a[0]*n[1]-a[1]*n[0]};
+      f32 L=sqrtf(t1[0]*t1[0]+t1[1]*t1[1]+t1[2]*t1[2]); if(L<1e-6f)continue; t1[0]/=L;t1[1]/=L;t1[2]/=L;
+      f32 t2[3]={n[1]*t1[2]-n[2]*t1[1], n[2]*t1[0]-n[0]*t1[2], n[0]*t1[1]-n[1]*t1[0]};
+      for(int k=0;k<8;k++){
+        f32 ang=k*0.7853981634f, cu=cosf(ang), cv=sinf(ang);
+        f32 dz=cu*t1[0]+cv*t2[0], dy=cu*t1[1]+cv*t2[1], dx=cu*t1[2]+cv*t2[2];
+        f32 qz=cp.z+p.step*dz, qy=cp.y+p.step*dy, qx=cp.x+p.step*dx;
+        f32 nn[3]; normal_at(normal,nz,ny,nx,qz,qy,qx,nn);
+        if(!snap(vol,sheet,nz,ny,nx,p.snap_radius,p.i_min,p.cont_thresh,nn,&qz,&qy,&qx)) continue;
+        if(fabsf(n[0]*nn[0]+n[1]*nn[1]+n[2]*nn[2]) < p.normal_cos) continue;
+        int wz=(int)lroundf(qz),wy=(int)lroundf(qy),wx=(int)lroundf(qx);
+        if(wz<0||wz>=nz||wy<0||wy>=ny||wx<0||wx>=nx) continue;
+        draw_line_lab(lab,nz,ny,nx,cp.z,cp.y,cp.x,qz,qy,qx,id);
+        size_t wi=IDX(wz,wy,wx); if(visited[wi]) continue;
+        visited[wi]=1; lab[wi]=id;
+        if(tail<(size_t)N) q[tail++]=(frontpt){qz,qy,qx,nn[0],nn[1],nn[2]};
+      }
+    }
+    nsheets++;
+  }
+  free(sheet);free(normal);free(visited);free(q);
+  return nsheets;
+}

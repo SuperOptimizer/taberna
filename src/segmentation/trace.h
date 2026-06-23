@@ -36,4 +36,9 @@ trace_params trace_default_params(void);
  * <0 on allocation failure. */
 int sheet_trace(const f32 *vol, int nz, int ny, int nx, const trace_params *p, u8 *out);
 
+/* Like sheet_trace but writes a PER-SHEET label into `lab` (s32, nz*ny*nx, zeroed first; 0 = no sheet,
+ * else the 1-based front id). Each advancing front (one wrap) gets a distinct id, so adjacent wraps the
+ * normal-gate kept apart stay distinct even where they touch. Returns the number of fronts, <0 on fail. */
+int sheet_trace_lab(const f32 *vol, int nz, int ny, int nx, const trace_params *p, s32 *lab);
+
 #endif // TABERNA_TRACE_H

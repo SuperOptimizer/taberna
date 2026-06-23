@@ -199,3 +199,6 @@ target_link_libraries(tifxyz PRIVATE taberna_io m)
 
 add_executable(surf_pred surf_pred.c)
 target_link_libraries(surf_pred PRIVATE taberna_io taberna_segmentation fysics m)
+
+add_executable(trace_mca trace_mca.c)
+target_link_libraries(trace_mca PRIVATE taberna_io taberna_segmentation fysics m)
