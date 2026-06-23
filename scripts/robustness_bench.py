@@ -9,6 +9,14 @@ backward-switch, z-coherence) and FLAG the locations that fail any of them.
 
 Usage: robustness_bench.py [ARC] [OUTDIR] [JOBS]
   Locations are defined in LOCATIONS below (edit to add coverage). Each is a standalone crop.
+
+NOTE: this measures STANDALONE (no coarse prior) robustness = the worst case. In production every
+fine tile gets a coarse prior + GLAM, which RESCUES the standalone-weak regimes: off-center tile
+backward-switch 134->62 (halved), inner-core scale graph 20->14 (snaps to the direct sheet count).
+So a standalone FLAG on a partial/off-center/core crop is NOT a production failure -- the centered
+coarse solve (scale 0-10% at all centered locations here) sets the global reference and the prior
+propagates it. Trust the centered-crop rows for the global scale; treat partial-crop flags as
+"needs the prior" not "broken".
 """
 import sys, os, re, subprocess, csv
 from concurrent.futures import ThreadPoolExecutor
