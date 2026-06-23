@@ -147,6 +147,13 @@ u to the winding so wraps don't collapse. Verified (small crop → full region):
   ray): 19.63 → 19.22 at λ0.25, a ~2% drop, much of which is spurious-flip removal (a flip splits one sheet
   into 2 labels, inflating the count). Visual (touch-dense zoom): cleaner/longer single-color sheet runs,
   no merging. Default λ=0.3 (effective, conservative on touch-merging).
+- DOWNSTREAM VALIDATION (2026-06-23, metric #4): fed the TV-cleaned field `_tv.f32` vs the raw
+  `wind_poisson` field into `unroll_wind` (SPIRAL, auto-center) on the L1 region. The TV unroll is
+  measurably AND visibly sharper: contrast-normalized render-coord sheet-edge sharpness +73%, global
+  contrast +33% (high-zoom identical-stretch crop confirms crisper fiber/sheet streaks, same structure,
+  not artificial banding). MECHANISM: the smoother field bins each sheet's voxels into a tighter render-
+  coord range, so the mean-composited flattening is sharper. So the Phase 3a win is real on the actual
+  product, not just the proxy flip metric — justifying the defect-2 hard-cut build.
 - SCOPE: fixes defect 1 (along-sheet flip), the pervasive one. Defect 2 (LEAKED touches, where W itself
   failed to count the turn) is NOT yet fixed — W can't separate what it didn't resolve, and a data term
   tied to W inherits that. NEXT increment: add the monotone-OUTWARD ordering constraint (Ishikawa level-
