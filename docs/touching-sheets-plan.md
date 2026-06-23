@@ -109,6 +109,28 @@ touches via the ordering+separation constraint). It is the real Phase 3b/3 build
 (Boykov–Kolmogorov single-file) + Ishikawa ordered-label graph + banding/tiling for scale; a focused
 build, not a tail-of-session patch. floor(W) (wind_label, despeckled, _lab.i32) is the robust interim.
 
+**Phase 2a (done, 2026-06-23) — sheet-normal forcing of the winding solve: TESTED-NEGATIVE.** The
+hypothesis (the higher-leverage one, per the plan's governing principle): instead of regularizing a
+leaked label DOWNSTREAM, harden the FIELD at the source so floor(W) just works — drive the Poisson
+solve with forcing = div(n_out/pitch) (n_out = outward sheet normal from `st_sheet_detect`) so iso-W
+follows the ACTUAL sheets, not the uniform-pitch radial assumption. Wired as `wind_poisson … usenormals=1`
+(the `wfield_params.forcing` plumbing already existed). A/B on the canonical touch region (L2,
+z3936 y718 x1580, 32×1024×1024, pitch 20, 11.1M material voxels):
+- Global monodromy preserved (both fields: 31 wraps, −0.2..30.6) — the anchor holds, good.
+- Field perturbation is small: mean |W_norm−W_base| = 0.024 wraps, 2.51% of floor(W) labels flip.
+- DECISIVE metric (2D structure-tensor sheetness + along-sheet-tangent floor(W)-flip fraction at high-
+  sheetness voxels, the direct measure of defect 1): BASE 4.04% vs NORMAL 4.11%. Swept sthr∈{0.30,0.45,
+  0.60}×step∈{1.5,3.0}: |Δ|≤0.07pp and SIGN-INCONSISTENT (+ at step1.5, − at step3.0) ⇒ pure noise.
+- CONCLUSION: local normal-forcing does NOT reduce the along-sheet flip. The baseline Poisson field
+  ALREADY follows sheet normals about as well as the forced one; the flip is the GLOBAL integer-crossing-
+  along-a-sheet problem (a sheet whose W runs e.g. 2.9→3.1 over its length — both halves locally self-
+  consistent), which no source-side local term touches. This confirms the global ordered-label solve is
+  required FROM THE UPSTREAM SIDE TOO (3b confirmed it downstream). The `usenormals` flag is kept default-
+  OFF as a documented cross-check; baseline is untouched. Note: `pherc0332.mca` (full 9.75TB pyramid) is
+  currently unreadable (read-fail, likely mid-reformat per the archive-format work) — used
+  `pherc0332_L2.mca`, which holds native-res data for this ROI with the umbilicus at local (512,513),
+  exactly reproducing the `dress2` setup.
+
 ## Phase 1 — Winding-gated supervoxel merge (Family A; the actionable fix)
 
 Reuse `tools/svaff_seg.c` (SNIC supervoxels + per-supervoxel orientation + signed RAG + MWS). The wall
