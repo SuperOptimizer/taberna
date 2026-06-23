@@ -26,7 +26,15 @@
  * the fit -> RIDGE-ONLY by default (argv[15]=1 to add recto for delaminated outer regions).
  *
  * usage: sheet_sep3d ARCHIVE OUTBASE lod z0 y0 x0 dz dy dx [minseg=40] [pitch=auto] [LAM=0.6]
- *        [WEQ=3] [z-tie=0] [use_recto=0] [LPRI=0.15]
+ *        [WEQ=3] [z-tie=0] [use_recto=0] [LPRI=0.15] [radw=1] [barclose=1] [zmed=0] [SP=0]
+ *        [umbref=1] [wdrescue=0] [robsig=0.6] [usesheet=1] [slicecv=0] [cxoff=0]
+ *        [priorvol=] [priorlod=] [GLAM=0]
+ * COARSE-GLOBAL PRIOR (the tiling fix): pass priorvol=a coarse _vol.f32 (solved once over the whole
+ *   region) + priorlod=its LOD. Each fine tile then references ONE global winding instead of a
+ *   per-crop radius prior -> tiles share an absolute scale. LPRI~8 pins the NODE solve; GLAM~0.3
+ *   adds a per-voxel pull on the DENSE fill (the part that otherwise diverges per-crop). Verified:
+ *   adjacent-tile agreement <0.25 wrap 0.27->0.97, fill-climb PRESERVED at 19 wraps (no flattening),
+ *   backward-switch + z-coherence both improve. This is how sheet_sep3d plugs into multi-resolution.
  * STATUS: node winding CORRECT; dense backward-switch 316->139/1000 voxels (radial diffusion, barriers-only block). Outer region + 3D structure-tensor normals are the remaining polish.
  */
 #include <stdio.h>
@@ -146,6 +154,21 @@ static long agg_edges(long*raw,long nraw,int K,int**ao,int**bo,long**wo,long**so
   long e=0; for(long i=0;i<nraw;){ long key=raw[i]>>4; long j=i,ss=0; while(j<nraw&&(raw[j]>>4)==key){ ss+=raw[j]&15; j++; } long c=j-i;
     if(c>=minc){ ea[e]=(int)(key/K); eb[e]=(int)(key%K); ew[e]=c; if(es)es[e]=lround((double)ss/c); e++; } i=j; }
   *ao=ea;*bo=eb;*wo=ew; if(so)*so=es; return ne;
+}
+
+// NaN-aware trilinear sample of a coarse winding volume (z,y,x; x fastest). Off-material voxels
+// are NaN; we average only the FINITE corners, reweighting trilinear weights. Returns NAN if the
+// 8-corner cell has no finite voxel (caller falls back to the radius prior there).
+static double cw_trilin(const float*w,int nz,int ny,int nx,double z,double y,double x){
+  if(z<0)z=0; if(z>nz-1)z=nz-1; if(y<0)y=0; if(y>ny-1)y=ny-1; if(x<0)x=0; if(x>nx-1)x=nx-1;
+  int z0=(int)z,y0=(int)y,x0=(int)x, z1=z0<nz-1?z0+1:z0,y1=y0<ny-1?y0+1:y0,x1=x0<nx-1?x0+1:x0;
+  double dz=z-z0,dy=y-y0,dx=x-x0; double acc=0,wt=0;
+  int zs[2]={z0,z1},ys[2]={y0,y1},xs[2]={x0,x1};
+  double zw[2]={1-dz,dz},yw[2]={1-dy,dy},xw[2]={1-dx,dx};
+  for(int a=0;a<2;a++)for(int b=0;b<2;b++)for(int c=0;c<2;c++){
+    double v=w[((size_t)zs[a]*ny+ys[b])*nx+xs[c]]; if(!isfinite(v))continue;
+    double g=zw[a]*yw[b]*xw[c]; acc+=g*v; wt+=g; }
+  return wt>1e-9? acc/wt : NAN;
 }
 
 int main(int argc,char**argv){
@@ -431,6 +454,51 @@ int main(int argc,char**argv){
     fprintf(stderr,"using windingDistance prior (cumulative sheet-crossings from center)\n");
   }
   const double LPRI=argc>16?atof(argv[16]):0.15;        // radius-prior strength
+  // ---- COARSE-GLOBAL-WINDING PRIOR (argv[27]=path to a coarse _vol.f32, argv[28]=its LOD) ----
+  // The radius prior pins each floating graph component from a SINGLE-CROP quantity (r-rmin)/pitch,
+  // so adjacent crops disagree by integer offsets (the winding is NOT crop-invariant). Replacing it
+  // with a lookup into ONE coarse global winding -- solved once over the whole region, internally
+  // consistent (one connected component at coarse LOD) -- gives every tile the SAME absolute
+  // reference. Tiles then stitch trivially. Where the coarse field is NaN (off-material / outside
+  // its bbox) we keep the radius prior. Use a stronger LPRI (~1-4) so tiles snap to the global field.
+  float*cwv=NULL; int haveprior=0;   // cwv = dense coarse winding sampled per fine voxel (fill anchor)
+  if(argc>28 && argv[27][0]){
+    const char*pvf=argv[27]; int plod=atoi(argv[28]);
+    FILE*pf=fopen(pvf,"rb");
+    if(!pf){ fprintf(stderr,"WARN: cannot open prior volume %s; using radius prior\n",pvf); }
+    else{
+      int ph[6]; if(fread(ph,sizeof(int),6,pf)!=6){ fprintf(stderr,"WARN: bad prior header; radius prior\n"); fclose(pf); }
+      else{
+        int cdz=ph[0],cdy=ph[1],cdx=ph[2]; long cz0=ph[3],cy0=ph[4],cx0=ph[5];
+        size_t cn=(size_t)cdz*cdy*cdx; float*cw=malloc(cn*sizeof(float));
+        if(fread(cw,sizeof(float),cn,pf)!=cn){ fprintf(stderr,"WARN: short prior volume; radius prior\n"); free(cw); }
+        else{
+          // map a fine-crop voxel (fine-LOD index z0+z, ...) into coarse-LOD grid index:
+          //   coarse_idx = (fine_origin + i) * 2^(lod-plod) - coarse_origin
+          double scl=ldexp(1.0,lod-plod); long nov=0,nfb=0;
+          // (1) node prior: sample at node centroids
+          for(int i=0;i<NT;i++){
+            double cz=(z0+nodez[i])*scl-cz0, cyc=(y0+nodeY[i])*scl-cy0, cxc=(x0+nodeX[i])*scl-cx0;
+            double s=cw_trilin(cw,cdz,cdy,cdx,cz,cyc,cxc);
+            if(isfinite(s)){ prior[i]=s; nov++; } else nfb++;
+          }
+          // (2) DENSE coarse winding sampled at every fine voxel -> volumetric anchor for the fill.
+          // The node prior pins the graph solve but the dense diffusion then diverges per-crop near
+          // boundaries/unanchored bands; a weak global pull toward cwv everywhere closes that gap.
+          cwv=malloc(nn*sizeof(float));
+          #pragma omp parallel for schedule(static)
+          for(int z=0;z<dz;z++)for(int y=0;y<dy;y++)for(int x=0;x<dx;x++){
+            size_t p=(size_t)z*dy*dx+(size_t)y*dx+x;
+            cwv[p]=(float)cw_trilin(cw,cdz,cdy,cdx,(z0+z)*scl-cz0,(y0+y)*scl-cy0,(x0+x)*scl-cx0); }
+          free(cw);
+          haveprior=1;   // line below (wind[i]=prior[i]) warm-starts the solve from the global field
+          fprintf(stderr,"coarse-global prior %s (LOD%d, %dx%dx%d): %ld/%d nodes sampled, %ld fell back to radius\n",
+                  pvf,plod,cdz,cdy,cdx,nov,NT,nfb);
+        }
+      }
+      if(pf)fclose(pf);
+    }
+  }
   // VARIABLE-PITCH SPIRAL FIT (adapted from Henderson spiral-fitting's per-slice affine +
   // gap-scaling field, done classically): after a winding solve, fit a SMOOTH per-z spiral
   // r ~= r0(z) + pitch(z)*w (robust Tukey line per slice, then smoothed across z), and feed
@@ -462,7 +530,7 @@ int main(int argc,char**argv){
       { double *t0=malloc(dz*sizeof(double)),*t1=malloc(dz*sizeof(double));
         for(int z=0;z<dz;z++){ double s0=0,s1=0;int n=0; for(int d=-3;d<=3;d++){int zz=z+d; if(zz<0||zz>=dz)continue; s0+=r0z[zz];s1+=ptz[zz];n++;} t0[z]=s0/n;t1[z]=s1/n; }
         memcpy(r0z,t0,dz*sizeof(double)); memcpy(ptz,t1,dz*sizeof(double)); free(t0);free(t1); }
-      for(int i=0;i<NT;i++){ int z=(int)lround(nodez[i]); if(z<0)z=0;if(z>=dz)z=dz-1; prior[i]=(nodeR[i]-r0z[z])/ptz[z]; }
+      if(!haveprior) for(int i=0;i<NT;i++){ int z=(int)lround(nodez[i]); if(z<0)z=0;if(z>=dz)z=dz-1; prior[i]=(nodeR[i]-r0z[z])/ptz[z]; }
       // report spiral-fit residual (median |r - model| in wraps)
       double sr2=0;long ns=0; for(int i=0;i<NT;i++){ int z=(int)lround(nodez[i]);if(z<0)z=0;if(z>=dz)z=dz-1; double e=(nodeR[i]-r0z[z])/ptz[z]-wind[i]; sr2+=fabs(e);ns++; }
       double pmn=1e30,pmx=-1e30; for(int z=0;z<dz;z++){ if(ptz[z]<pmn)pmn=ptz[z]; if(ptz[z]>pmx)pmx=ptz[z]; }
@@ -561,6 +629,11 @@ int main(int argc,char**argv){
   // so the median consensus is the real winding and Tukey-rejecting outliers removes cross-barrier
   // LEAKS without collapsing the climb. Verified by the fill-coverage guard (climb must stay high).
   const double robsig=argc>23?atof(argv[23]):0.6;   // two-phase robust ON by default (verified safe)
+  // GLAM = strength of the per-voxel pull toward the coarse-global field cwv (argv[29]; only active
+  // when a coarse prior was supplied). Scaled by local coupling ws so it dominates ONLY where the
+  // fill is otherwise weakly determined (crop boundaries, unanchored bands) -- this is what makes
+  // adjacent tiles' DENSE fields agree, while sheet-anchored detail (LAM) still wins near anchors.
+  const double GLAM=(argc>29 && haveprior && cwv)?atof(argv[29]):0.0;
   const int NIT=200, ROBIT=40;
   for(int it=0;it<NIT;it++){ int robust = (robsig>0 && it>=NIT-ROBIT); for(int color=0;color<2;color++){
     #pragma omp parallel for schedule(static)
@@ -582,11 +655,13 @@ int main(int argc,char**argv){
         for(int j=0;j<nn2;j++){ double d=(nval[j]-cons)/robsig, rob=(d*d<1)?(1-d*d)*(1-d*d):0; double w=nwt[j]*rob; s+=w*nval[j]; ws+=w; }
       } else { for(int j=0;j<nn2;j++){ s+=nwt[j]*nval[j]; ws+=nwt[j]; } }
       if(anc[p]){ double wa=LAM*ws+1e-6; s+=wa*ancw[p]; ws+=wa; }
+      if(GLAM>0 && isfinite(cwv[p])){ double wg=GLAM*ws+1e-9; s+=wg*cwv[p]; ws+=wg; }
       if(ws>1e-9){ double tgt=s/ws; wd[p]=(f32)(wd[p]+omega*(tgt-wd[p])); } }
   } }
   #undef MAT
   #undef INPW
   #undef TANW
+  if(cwv){ free(cwv); cwv=NULL; }
   // POST-SOLVE Z-MEDIAN: firmly-held per-slice anchors bake a whole-slice integer offset that
   // the local z-diffusion can't overcome (it only blends boundaries). A slice offset by +1 sits
   // between z-neighbours at 0, so a robust z-median over +/-zmedw removes the integer-jump
