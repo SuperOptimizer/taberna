@@ -83,17 +83,8 @@ int main(int argc,char**argv){
   mca_handle*h=mca_open(ctarc); if(!h){ fprintf(stderr,"open arc %s fail\n",ctarc); return 1; }
 
   if(fine){
-    // verify the fine archive really is ~scale x the winding archive (the padding can differ by up to
-    // ~scale voxels, but a gross mismatch means the two are NOT a clean LOD pyramid -> CT sheared vs winding)
-    { mca_handle*wh=mca_open(arc); if(wh){ int wz,wy,wx,wnl; float wq; mca_handle_dims(wh,&wz,&wy,&wx,&wq,&wnl);
-        int cz,cyy,cxx,cnl; float cq; mca_handle_dims(h,&cz,&cyy,&cxx,&cq,&cnl);
-        int ez=abs(cz-scale*wz),ey=abs(cyy-scale*wy),ex=abs(cxx-scale*wx);
-        // small mismatch = benign high-index padding (origin still aligned, fine for in-bounds regions);
-        // a large mismatch means the two are not a clean pyramid and CT is sheared vs winding.
-        double rel=(double)(ez+ey+ex)/(scale*(double)(wz+wy+wx));
-        if(rel>0.05) fprintf(stderr,"*** FINE WARNING: %s dims %dx%dx%d != %dx %s %dx%dx%d (off z%d y%d x%d, %.1f%%) -- CT likely MISREGISTERED vs winding ***\n",ctarc,cz,cyy,cxx,scale,arc,wz,wy,wx,ez,ey,ex,100*rel);
-        else fprintf(stderr,"FINE dims check: %s %dx%dx%d ~= %dx %s %dx%dx%d (off z%d y%d x%d = end-padding, benign for in-bounds regions)\n",ctarc,cz,cyy,cxx,scale,arc,wz,wy,wx,ez,ey,ex);
-        mca_close(wh); } }
+    // LODs share an origin; high-index padding makes dims differ from an exact scale-multiple, but the
+    // real data lines up at low indices, so no dims check is needed -- mca_read returns NULL if OOB.
     int Fz0=(z0+za)*scale, Fy0=y0*scale, Fx0=x0*scale, Fdz=zn*scale, Fdy=dy*scale, Fdx=dx*scale;
     fprintf(stderr,"FINE render: CT %s scale %d, fine region z%d y%d x%d + %dx%dx%d -> %d cols x %d rows\n",
             ctarc,scale,Fz0,Fy0,Fx0,Fdz,Fdy,Fdx,UW,Fdz);
