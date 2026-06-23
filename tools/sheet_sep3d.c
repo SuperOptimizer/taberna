@@ -54,9 +54,10 @@ static double g_tl;
 #define PHASE(n) do{ fprintf(stderr,"[t] %-22s %.2fs\n",n,tnow()-g_tl); g_tl=tnow(); }while(0)
 
 static int air_threshold(const u8 *v, size_t n){
-  long h[256]={0}; long tot=0;
-  for(size_t i=0;i<n;i++){ int x=v[i]; if(x>=1&&x<=254){ h[x]++; tot++; } }
-  if(tot<256) return 1;
+  long h[256]={0}; long tot=0; double allsum=0; long allnz=0;
+  for(size_t i=0;i<n;i++){ int x=v[i]; if(x){ allsum+=x; allnz++; } if(x>=1&&x<=254){ h[x]++; tot++; } }
+  if(tot<256){ // too few mid-range voxels for Otsu (binary/mostly-air tile): data-driven floor instead
+    int t=allnz? (int)(0.5*allsum/allnz+0.5) : 1; if(t<1)t=1; if(t>254)t=254; return t; }
   double sum=0; for(int i=1;i<=254;i++) sum+=(double)i*h[i];
   double sumB=0,wB=0,best=-1; int thr=1;
   for(int t=1;t<=254;t++){ wB+=h[t]; if(wB==0)continue; double wF=(double)tot-wB; if(wF<=0)break;
@@ -267,6 +268,7 @@ int main(int argc,char**argv){
   f32*sig = usesheet? sh : vs;
   double sigprom = usesheet? 0.25*255.0 : vprom;    // inter-sheet valley prominence on the signal
   double ridgethr= usesheet? 0.12*255.0 : athr;     // "is on a sheet" floor for the ridge
+  double barprom = usesheet? 0.015*255.0 : 0.10*vprom;  // min per-side dip to mark an inter-sheet barrier
 
   // refine per-z umbilicus from sheet normals (robust line intersection); keeps coarse estimate
   // as init/fallback. Sanity-clamp: reject a refined center that bolts >0.6*dim from coarse.
@@ -324,7 +326,9 @@ int main(int argc,char**argv){
     // big wrap-arc node (not fragments), so the graph is connected -- the whole point of B.
     f32 c=sig[p],in=sig[IDX(z,iy,ix)],ou=sig[IDX(z,oy,ox)];
     if(c>=in&&c>=ou&&c>=ridgethr) ridge[p]=1;
-    if(c<=in&&c<=ou) bar[p]=1;                            // radial local min = inter-sheet boundary
+    // radial local min = inter-sheet boundary. Require a real dip on BOTH sides (review: the old
+    // c<=in&&c<=ou fired on flat runs, over-sealing the diffusion and biasing the fill).
+    if(in-c>=barprom && ou-c>=barprom) bar[p]=1;
     for(int k=1;k<=3;k++){ int ry=(int)lround(y+uy*k),rx=(int)lround(x+ux*k);
       if(ry>=0&&ry<dy&&rx>=0&&rx<dx&&v[IDX(z,ry,rx)]<athr){ recto[p]=1; break; } } }
   if(!use_recto) memset(recto,0,nn);   // ridge-only mode: drop the unreliable recto graph
