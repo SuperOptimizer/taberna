@@ -20,6 +20,7 @@
 #include <string.h>
 #include <math.h>
 #include "io/mca.h"
+#include "segmentation/sheet_tensor.h"
 
 static int air_threshold(const u8*v,size_t n){ long h[256]={0},t=0; double s=0; long z=0;
   for(size_t i=0;i<n;i++){int x=v[i]; if(x){s+=x;z++;} if(x>=1&&x<=254){h[x]++;t++;}}
@@ -44,6 +45,7 @@ int main(int argc,char**argv){
   int z0=atoi(argv[4]),y0=atoi(argv[5]),x0=atoi(argv[6]),dz=atoi(argv[7]),dy=atoi(argv[8]),dx=atoi(argv[9]);
   const char*pvf=argv[10]; int plod=atoi(argv[11]);
   int zc=argc>12?atoi(argv[12]):dz/2; int modr=argc>13?atoi(argv[13]):1;
+  double sthr=argc>14?atof(argv[14]):0.15;   // sheetness threshold for connected-component "patches"
   mca_handle*arc=mca_open(path); if(!arc){fprintf(stderr,"open fail\n");return 1;}
   u8*v=mca_read(arc,lod,z0,y0,x0,dz,dy,dx); if(!v){fprintf(stderr,"read fail\n");return 1;}
   size_t nn=(size_t)dz*dy*dx; int athr=air_threshold(v,nn);
@@ -55,13 +57,14 @@ int main(int argc,char**argv){
   if(fread(cw,sizeof(float),cn,pf)!=cn){fprintf(stderr,"data fail\n");return 1;} fclose(pf);
   double scl=ldexp(1.0,lod-plod);
 
-  // raw label = floor(W) per material voxel (-1 = air / no winding)
-  s32*lab=malloc(nn*sizeof(s32));
+  // raw label = floor(W) per material voxel (-1 = air / no winding); also keep raw W on slice zc
+  s32*lab=malloc(nn*sizeof(s32)); float*Wsl=malloc((size_t)dy*dx*sizeof(float));
   long wmin=1<<30,wmax=-(1<<30),nlab=0;
   for(int z=0;z<dz;z++)for(int y=0;y<dy;y++)for(int x=0;x<dx;x++){ size_t p=((size_t)z*dy+y)*dx+x;
-    lab[p]=-1; if(v[p]<athr)continue;
-    double wv=cw_trilin(cw,cnz,cny,cnx,(z0+z)*scl-cz0,(y0+y)*scl-cy0,(x0+x)*scl-cx0);
-    if(isfinite(wv)){ int L=(int)floor(wv); lab[p]=L; nlab++; if(L<wmin)wmin=L; if(L>wmax)wmax=L; } }
+    lab[p]=-1; double wv=NAN;
+    if(v[p]>=athr){ wv=cw_trilin(cw,cnz,cny,cnx,(z0+z)*scl-cz0,(y0+y)*scl-cy0,(x0+x)*scl-cx0);
+      if(isfinite(wv)){ int L=(int)floor(wv); lab[p]=L; nlab++; if(L<wmin)wmin=L; if(L>wmax)wmax=L; } }
+    if(z==zc) Wsl[(size_t)y*dx+x]=(float)wv; }
   free(cw);
   fprintf(stderr,"floor(W): %ld labelled voxels, wrap bands %ld..%ld (%ld wraps)\n",nlab,wmin,wmax,wmax-wmin+1);
 
@@ -92,5 +95,48 @@ int main(int argc,char**argv){
     if(lab[p]>=0){ int q=((lab[p]%6)+6)%6; rgb[o]=pal[q][0]; rgb[o+1]=pal[q][1]; rgb[o+2]=pal[q][2]; } }
   snprintf(fn,sizeof fn,"%s_label.ppm",outp); FILE*f=fopen(fn,"wb");
   if(f){ fprintf(f,"P6\n%d %d\n255\n",dx,dy); fwrite(rgb,1,(size_t)dy*dx*3,f); fclose(f); fprintf(stderr,"wrote %s\n",fn); }
-  free(rgb);free(lab);free(v); mca_close(arc); return 0;
+  free(rgb);
+
+  // ---- Phase 3b ATTEMPT (TESTED-NEGATIVE on densely-touching regions): connected-component sheet
+  // labeling anchored to winding (Thaumato "patch + winding number"). A sheet = a connected component of
+  // high-sheetness voxels; label = round(mean winding). HOPE: label constant per sheet + touching wraps
+  // (connectivity-separable) split into 2 patches. RESULT: in a densely-touching region the high-
+  // sheetness voxels form ONE connected mass spanning ALL wraps (touches bridge everything) -> one giant
+  // patch with a meaningless mean-W; raising sthr (0.15->0.6) only erodes sheets into noise fragments
+  // without breaking the bridges (793->1395 tiny patches around the same mega-blob). So pure connectivity
+  // CANNOT separate wraps here. The robust labeler stays floor(W) above; the genuine touch fix needs the
+  // GLOBAL ordered-label optimization (continuous-max-flow / graph-cut: integer L minimizing |L-W| +
+  // smoothness, boundaries pinned to low-sheetness gaps) -- the heavy Phase 3b build. _cc.ppm kept as a
+  // diagnostic of the bridging. Mid-z slice (per-slice 2D CC).
+  f32*vf=malloc((size_t)dz*dy*dx*sizeof(f32)),*sh=malloc((size_t)dz*dy*dx*sizeof(f32));
+  for(size_t p=0;p<nn;p++) vf[p]=v[p];
+  st_params spp=st_default_params(); spp.sigma_grad=1.0f; spp.sigma_tensor=0.8f;
+  st_sheet_detect(vf,dz,dy,dx,&spp,sh,NULL); free(vf);
+  double smx=0; for(size_t p=0;p<nn;p++) if(sh[p]>smx)smx=sh[p]; if(smx<1e-6)smx=1;
+  u8*sm=calloc((size_t)dy*dx,1);                                     // sheet mask on slice zc
+  for(int y=0;y<dy;y++)for(int x=0;x<dx;x++){ size_t p=((size_t)zc*dy+y)*dx+x;
+    if(v[p]>=athr && sh[p]/smx>=sthr) sm[(size_t)y*dx+x]=1; }
+  free(sh);
+  s32*cc=malloc((size_t)dy*dx*sizeof(s32)); for(size_t i=0;i<(size_t)dy*dx;i++) cc[i]=-1;
+  int *stk=malloc((size_t)dy*dx*sizeof(int)); int ncc=0; long merged2=0;
+  // BFS flood fill, 8-connectivity; per-component accumulate mean W -> wrap label
+  s32*cclab=malloc((size_t)dy*dx*sizeof(s32)); int ccn=0; int cccap=dy*dx;
+  for(int y0i=0;y0i<dy;y0i++)for(int x0i=0;x0i<dx;x0i++){ size_t s0=(size_t)y0i*dx+x0i;
+    if(!sm[s0]||cc[s0]>=0)continue; int top=0; stk[top++]=(int)s0; cc[s0]=ncc; double wsum=0; long wc=0;
+    while(top){ int q=stk[--top]; int qy=q/dx,qx=q%dx; double wv=Wsl[q]; if(isfinite(wv)){wsum+=wv;wc++;}
+      for(int ddy=-1;ddy<=1;ddy++)for(int ddx=-1;ddx<=1;ddx++){ if(!ddy&&!ddx)continue; int ny=qy+ddy,nx=qx+ddx;
+        if(ny<0||ny>=dy||nx<0||nx>=dx)continue; size_t nq=(size_t)ny*dx+nx;
+        if(sm[nq]&&cc[nq]<0){ cc[nq]=ncc; stk[top++]=(int)nq; } } }
+    (void)cccap; cclab[ncc]= wc? (s32)lround(wsum/wc) : -1; ncc++; }
+  fprintf(stderr,"Phase 3b: %d sheet patches (sthr=%.2f) on slice z=%d\n",ncc,sthr,zc);
+  free(stk);
+  // render: color each patch by its winding-anchored wrap label (ordered palette)
+  u8*rgb2=calloc((size_t)dy*dx*3,1);
+  for(int y=0;y<dy;y++)for(int x=0;x<dx;x++){ size_t p=((size_t)zc*dy+y)*dx+x,o=((size_t)y*dx+x)*3,s=(size_t)y*dx+x;
+    int g=v[p]/4; rgb2[o]=rgb2[o+1]=rgb2[o+2]=(u8)g;
+    if(cc[s]>=0&&cclab[cc[s]]>=0){ int L=cclab[cc[s]],q=((L%6)+6)%6; rgb2[o]=pal[q][0]; rgb2[o+1]=pal[q][1]; rgb2[o+2]=pal[q][2]; } }
+  snprintf(fn,sizeof fn,"%s_cc.ppm",outp); FILE*f2=fopen(fn,"wb");
+  if(f2){ fprintf(f2,"P6\n%d %d\n255\n",dx,dy); fwrite(rgb2,1,(size_t)dy*dx*3,f2); fclose(f2); fprintf(stderr,"wrote %s\n",fn); }
+  (void)merged2; free(rgb2);free(cc);free(cclab);free(sm);free(Wsl);
+  free(lab);free(v); mca_close(arc); return 0;
 }

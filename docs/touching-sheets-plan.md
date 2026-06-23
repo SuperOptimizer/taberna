@@ -89,9 +89,19 @@ field-based Δw via a coarse `_vol.f32` + `cw_trilin`). Results:
   defects only where (a) a sheet spans an integer-W crossing ALONG its length (band phase not pinned to
   the gap) and (b) convergence/touch zones.
 
-**Next:** the real touch fix = ordered relabel with grad-W-following columns (or continuous-max-flow on
-the voxel field, Phase 3b), which also pins band boundaries to gaps (fixes the along-sheet label flip).
-Phase 2b leak detection should likewise follow grad-W columns, not radial rays.
+**Phase 3b attempts (done, 2026-06-23) — two lightweight relabelings TESTED-NEGATIVE; the global solve
+is required.** Both tried to fix the along-sheet floor(W) flip + split leaked touches without the heavy
+optimizer; both lose to plain floor(W):
+- grad-W / radial-ray ordered relabel: rays are the wrong column geometry on a deformed scroll (above).
+- connected-component sheet labeling anchored to winding (Thaumato patch+winding): in a densely-touching
+  region the high-sheetness voxels form ONE connected mass spanning ALL wraps (touches bridge everything)
+  → one giant patch, meaningless mean-W; raising sthr 0.15→0.6 only erodes sheets into noise (793→1395
+  tiny fragments around the same mega-blob) without breaking the bridges. Pure connectivity can't separate.
+CONCLUSION: the genuine touch fix is the GLOBAL ordered-label optimization (continuous-max-flow / graph
+cut: integer L minimizing |L−W| + pairwise smoothness, with label boundaries pinned to low-sheetness
+gaps). That single formulation fixes BOTH defects (along-sheet flip via the smoothness+gap term, leaked
+touches via the ordering+separation constraint). This is the real Phase 3b/3 build and the clear next
+step; floor(W) (wind_label) is the robust interim instance labeler.
 
 ## Phase 1 — Winding-gated supervoxel merge (Family A; the actionable fix)
 
