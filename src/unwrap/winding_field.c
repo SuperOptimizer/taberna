@@ -116,7 +116,48 @@ int winding_field_solve(const u8 *mask, int nz, int ny, int nx,
             if (!mask[i]) continue;                       // stays 0
             if (seed_mask && seed_mask[i]) continue;      // Dirichlet: pinned
             double acc = 0.0;
-            int cnt = 0;
+            double cnt = 0.0;
+            if (p.tensor6 || p.normal) {
+              // FULL anisotropic operator div(D grad W) = Dxx d2_xx + ... + 2Dxy d2_xy + ...
+              // axial part keeps the (positive) W_p coefficient = 2*(Dxx+Dyy+Dzz); the off-diagonal
+              // cross terms couple DIAGONAL neighbors (only added when all 4 in-plane diagonals are
+              // material) and are lagged to the current W (stable Gauss-Seidel deferred correction).
+              double Dzz, Dyy, Dxx, Dyz, Dxz, Dxy;
+              if (p.tensor6) {
+                const f32 *T = p.tensor6;
+                Dzz = T[6*i+0]; Dyy = T[6*i+1]; Dxx = T[6*i+2];
+                Dyz = T[6*i+3]; Dxz = T[6*i+4]; Dxy = T[6*i+5];
+              } else {
+                // build D = I-(1-a)*s*n n^T on the fly from the stored normal (no 6*N array)
+                double nx = p.normal[3*i+0], ny = p.normal[3*i+1], nz = p.normal[3*i+2];
+                double s = p.sheetness ? (double)p.sheetness[i] : 1.0; if (s<0) s=0; if (s>1) s=1;
+                double k = (1.0 - (double)p.tensor_alpha) * s, n2 = nx*nx+ny*ny+nz*nz;
+                if (n2 < 1e-6) { Dxx=Dyy=Dzz=1.0; Dxy=Dxz=Dyz=0.0; }
+                else { Dxx=1.0-k*nx*nx; Dyy=1.0-k*ny*ny; Dzz=1.0-k*nz*nz;
+                       Dxy=-k*nx*ny; Dxz=-k*nx*nz; Dyz=-k*ny*nz; }
+              }
+              #define MAT(zz,yy,xx) ((xx)>=0&&(xx)<nx&&(yy)>=0&&(yy)<ny&&(zz)>=0&&(zz)<nz&&mask[IDX(zz,yy,xx)])
+              #define WV(zz,yy,xx) (winding[IDX(zz,yy,xx)])
+              if (MAT(z,y,x-1)) { acc += Dxx*WV(z,y,x-1); cnt += Dxx; }
+              if (MAT(z,y,x+1)) { acc += Dxx*WV(z,y,x+1); cnt += Dxx; }
+              if (MAT(z,y-1,x)) { acc += Dyy*WV(z,y-1,x); cnt += Dyy; }
+              if (MAT(z,y+1,x)) { acc += Dyy*WV(z,y+1,x); cnt += Dyy; }
+              if (MAT(z-1,y,x)) { acc += Dzz*WV(z-1,y,x); cnt += Dzz; }
+              if (MAT(z+1,y,x)) { acc += Dzz*WV(z+1,y,x); cnt += Dzz; }
+              // cross terms: 2*Dab*d2_ab, d2_ab=(W[++]+W[--]-W[+-]-W[-+])/4; scaled by cross_relax
+              // (lagged -> can exceed diagonal slack at strong anisotropy; <1 keeps GS stable).
+              double cr = (p.cross_relax > 0.0f) ? 0.5*(double)p.cross_relax : 0.0;
+              if (cr>0.0) {
+              if (Dxy!=0 && MAT(z,y+1,x+1)&&MAT(z,y-1,x-1)&&MAT(z,y-1,x+1)&&MAT(z,y+1,x-1))
+                acc += cr*Dxy*(WV(z,y+1,x+1)+WV(z,y-1,x-1)-WV(z,y-1,x+1)-WV(z,y+1,x-1));
+              if (Dxz!=0 && MAT(z+1,y,x+1)&&MAT(z-1,y,x-1)&&MAT(z-1,y,x+1)&&MAT(z+1,y,x-1))
+                acc += cr*Dxz*(WV(z+1,y,x+1)+WV(z-1,y,x-1)-WV(z-1,y,x+1)-WV(z+1,y,x-1));
+              if (Dyz!=0 && MAT(z+1,y+1,x)&&MAT(z-1,y-1,x)&&MAT(z-1,y+1,x)&&MAT(z+1,y-1,x))
+                acc += cr*Dyz*(WV(z+1,y+1,x)+WV(z-1,y-1,x)-WV(z-1,y+1,x)-WV(z+1,y-1,x));
+              }
+              #undef MAT
+              #undef WV
+            } else {
             int nb[6][3] = {{z, y, x - 1}, {z, y, x + 1}, {z, y - 1, x},
                             {z, y + 1, x}, {z - 1, y, x}, {z + 1, y, x}};
             for (int k = 0; k < 6; k++) {
@@ -124,12 +165,21 @@ int winding_field_solve(const u8 *mask, int nz, int ny, int nx,
               if (xx < 0 || xx >= nx || yy < 0 || yy >= ny || zz < 0 || zz >= nz) continue;
               size_t j = IDX(zz, yy, xx);
               if (!mask[j]) continue;
-              acc += winding[j];
-              cnt++;
+              double wgt = 1.0;
+              if (p.aniso) {
+                // edge weight = harmonic-ish mean of the two voxels' axis diffusivity.
+                // aniso layout per voxel: [wz, wy, wx]; map axis x->2, y->1, z->0.
+                int ax = (k < 2) ? 2 : (k < 4) ? 1 : 0;
+                double wi = p.aniso[3 * i + ax], wj = p.aniso[3 * j + ax];
+                wgt = 0.5 * (wi + wj);
+              }
+              acc += wgt * winding[j];
+              cnt += wgt;
             }
-            if (cnt) {
-              // Poisson gradient-matching with optional anchor:
-              //   (cnt+lam)*W[i] = sum_neighbors - div(g) + lam*anchor[i]
+            }
+            if (cnt > 0.0) {
+              // Poisson gradient-matching with optional anchor and anisotropic weights:
+              //   (sum_w + lam)*W[i] = sum_w*neighbors - div(g) + lam*anchor[i]
               // forcing[i]=div of desired gradient (NULL->0->plain Laplacian); the
               // lam term softly holds W near the analytic init (keeps the monodromy).
               double num = acc - (p.forcing ? (double)p.forcing[i] : 0.0);

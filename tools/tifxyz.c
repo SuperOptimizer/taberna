@@ -57,9 +57,18 @@ int main(int argc, char **argv){
   if (strcmp(mode,"render")||argc<5){ fprintf(stderr,"render needs: SEGDIR ARC OUT.pgm\n"); free_tifxyz(&s); return 2; }
   const char *arcpath=argv[3], *outp=argv[4];
   int lod=argc>5?atoi(argv[5]):0; double scale=argc>6?atof(argv[6]):1.0; int uv=argc>7?atoi(argv[7]):48;
+  double lods=1.0/(double)(1<<lod);   // seg->lod0 via `scale`, then origin-subtract, then >>lod to the read grid
   mca_handle *arc=mca_open(arcpath); if(!arc){fprintf(stderr,"open arc fail\n"); free_tifxyz(&s); return 1; }
   int az,ay,ax,nl; float ql; mca_handle_dims(arc,&az,&ay,&ax,&ql,&nl);
   int lz=az>>lod, ly=ay>>lod, lx=ax>>lod;
+  // VC3D segment coords live in the FULL source-volume (world) frame; our archive is trimmed to a
+  // ROI, so archive(0,0,0) = world(roi.origin). Read that origin from the archive's metadata carveout
+  // and subtract it (after `scale` maps seg -> this archive's LOD0 world). Without this the surface
+  // samples air offset by the trim. TIFXYZ_NO_ROI=1 disables (coords already archive-local).
+  int roz=0,roy=0,rox=0;
+  if(getenv("TIFXYZ_NO_ROI")) fprintf(stderr,"ROI origin: disabled (TIFXYZ_NO_ROI)\n");
+  else if(mca_roi_origin(arc,&roz,&roy,&rox)==0) fprintf(stderr,"ROI origin (subtracted): z%d y%d x%d\n",roz,roy,rox);
+  else fprintf(stderr,"ROI origin: none in archive metadata -> assuming 0 (untrimmed)\n");
   fprintf(stderr,"render vs %s lod%d (%dx%dx%d), coord scale=%.3f, uvtile=%d\n",arcpath,lod,lz,ly,lx,scale,uv);
 
   u8 *out=calloc(N,1); long sampled=0,oob=0;
@@ -68,7 +77,7 @@ int main(int argc, char **argv){
     int v1=v0+uv<s.H?v0+uv:s.H, u1=u0+uv<s.W?u0+uv:s.W;
     double bz0=1e30,bz1=-1e30,by0=1e30,by1=-1e30,bx0=1e30,bx1=-1e30; int any=0;
     for(int v=v0;v<v1;v++)for(int u=u0;u<u1;u++){ size_t i=(size_t)v*s.W+u; if(s.X[i]<0||!isfinite(s.X[i]))continue;
-      double Z=s.Z[i]*scale,Y=s.Y[i]*scale,X=s.X[i]*scale; any=1;
+      double Z=(s.Z[i]*scale-roz)*lods,Y=(s.Y[i]*scale-roy)*lods,X=(s.X[i]*scale-rox)*lods; any=1;
       if(Z<bz0)bz0=Z; if(Z>bz1)bz1=Z; if(Y<by0)by0=Y; if(Y>by1)by1=Y; if(X<bx0)bx0=X; if(X>bx1)bx1=X; }
     if(!any)continue;
     int z0=(int)floor(bz0), y0=(int)floor(by0), x0=(int)floor(bx0);
@@ -79,7 +88,7 @@ int main(int argc, char **argv){
     if((double)dz*dy*dx > 600e6){ fprintf(stderr,"  tile (%d,%d) bbox %dx%dx%d too big -> skip (raise this cap or shrink uvtile)\n",v0,u0,dz,dy,dx); continue; }
     u8 *reg=mca_read(arc,lod,z0,y0,x0,dz,dy,dx); if(!reg)continue;
     for(int v=v0;v<v1;v++)for(int u=u0;u<u1;u++){ size_t i=(size_t)v*s.W+u; if(s.X[i]<0||!isfinite(s.X[i]))continue;
-      int Z=(int)lround(s.Z[i]*scale)-z0, Y=(int)lround(s.Y[i]*scale)-y0, X=(int)lround(s.X[i]*scale)-x0;
+      int Z=(int)lround((s.Z[i]*scale-roz)*lods)-z0, Y=(int)lround((s.Y[i]*scale-roy)*lods)-y0, X=(int)lround((s.X[i]*scale-rox)*lods)-x0;
       if(Z<0||Y<0||X<0||Z>=dz||Y>=dy||X>=dx){ oob++; continue; }
       out[i]=reg[((size_t)Z*dy+Y)*dx+X]; sampled++; }
     free(reg);

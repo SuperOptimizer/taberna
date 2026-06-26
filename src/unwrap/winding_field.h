@@ -35,6 +35,28 @@ typedef struct {
                        // (2) per-tile NATIVE re-solve warm-started from a global coarse
                        // winding — the anchor keeps each tile locked to the global
                        // coordinate (no seams) while local LOD0 detail refines it.
+  const f32 *tensor6;  // optional (size 6*nz*ny*nx: Dzz,Dyy,Dxx,Dyz,Dxz,Dxy per voxel), default NULL.
+                       // FULL anisotropic diffusion tensor D = I-(1-alpha)*n n^T. Solves the proper
+                       // div(D grad W)=forcing including the off-diagonal cross-derivative terms that
+                       // couple DIAGONAL neighbors -> faithful along-sheet smoothing even when the
+                       // sheet normal is off-axis (the diagonal `aniso` approx bleeds there). Takes
+                       // precedence over `aniso`. Orientation-free (uses n n^T).
+  const f32 *normal;   // optional (3*nz*ny*nx: nx,ny,nz per voxel, unoriented). When set and tensor6
+  const f32 *sheetness;// is NULL, the solver builds D = I-(1-tensor_alpha)*s*n n^T ON THE FLY per
+  f32 tensor_alpha;    // voxel (s=sheetness, 1 if NULL) -> same operator as tensor6 with ZERO extra
+                       // memory (no 6*N array). ~10 flops/voxel, negligible vs the 19-pt stencil.
+  f32 cross_relax;     // [0,1], default 1. Scales the off-diagonal cross terms of `tensor6`. The
+                       // cross terms are lagged (deferred correction) and at strong anisotropy can
+                       // exceed the diagonal slack -> runaway. <1 restores diagonal dominance/stability
+                       // (trades a little along-sheet fidelity). 0 == diagonal-only.
+  const f32 *aniso;    // optional (size 3*nz*ny*nx: wz,wy,wx per voxel), default NULL.
+                       // Per-axis diffusion weights in [alpha,1] for ANISOTROPIC smoothing:
+                       // the Gauss-Seidel neighbor average is weighted so the field smooths
+                       // ALONG the sheet plane (weight ~1) but stays SHARP across it (weight
+                       // ~alpha). Built from the structure-tensor sheet normal n as
+                       // w_axis = 1-(1-alpha)*n_axis^2 — needs only the UNORIENTED sheet
+                       // plane, so it bends level sets onto real sheets without the
+                       // umbilicus-outward orientation that fails in folds.
 } wfield_params;
 
 wfield_params winding_default_params(void);

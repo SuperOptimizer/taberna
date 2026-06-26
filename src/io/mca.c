@@ -9,6 +9,7 @@
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include "matter_compressor.h"
+#include "json.h"
 
 int mca_dims(const char *path, int *nz, int *ny, int *nx, float *quality, int *nlods) {
   int fd = open(path, O_RDONLY);
@@ -57,6 +58,33 @@ void mca_close(mca_handle *h) {
   if (!h) return;
   mc_archive_close(h->a);
   free(h);
+}
+
+const char *mca_metadata(const mca_handle *h, size_t *out_len) {
+  if (!h) { if (out_len) *out_len = 0; return NULL; }
+  size_t len = 0;
+  const char *m = mc_archive_metadata(h->a, &len);
+  if (out_len) *out_len = m ? len : 0;
+  return (m && len) ? m : NULL;
+}
+
+int mca_roi_origin(const mca_handle *h, int *oz, int *oy, int *ox) {
+  if (oz) *oz = 0; if (oy) *oy = 0; if (ox) *ox = 0;
+  size_t len = 0;
+  const char *meta = mca_metadata(h, &len);
+  if (!meta) return -1;
+  json_value *root = json_parse(meta, len);
+  if (!root) return -1;
+  const json_value *origin = json_obj_get(json_obj_get(root, "roi"), "origin");
+  int rc = -1;
+  if (origin && origin->type == JSON_ARR && origin->count == 3) {
+    if (oz) *oz = json_as_int(json_arr_at(origin, 0), 0);
+    if (oy) *oy = json_as_int(json_arr_at(origin, 1), 0);
+    if (ox) *ox = json_as_int(json_arr_at(origin, 2), 0);
+    rc = 0;
+  }
+  json_free(root);
+  return rc;
 }
 
 void mca_handle_dims(const mca_handle *h, int *nz, int *ny, int *nx, float *quality, int *nlods) {

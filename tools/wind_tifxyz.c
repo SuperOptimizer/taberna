@@ -60,15 +60,55 @@ int main(int argc,char**argv){
   // off the wavy sheet -> noise. Keep the RIDGE voxel (max CT = the sheet centerline) as the surface point.
   mca_handle*h=mca_open(arc); if(!h){fprintf(stderr,"open arc fail\n");return 1;}
   u8*ct=mca_read(h,lod,z0,y0,x0,dz,dy,dx); mca_close(h); if(!ct){fprintf(stderr,"CT read fail\n");return 1;}
+  // EXTRACT mode (WIND_EXTRACT env): "ridge" keeps the single max-CT voxel per (z,u) bin -- sharp but
+  // geometrically NOISY (the brightest voxel hops radially between columns -> a jumpy 3D manifold).
+  // "centroid" (default) takes the CT-weighted mean position over the bin: the bin is thin in render-
+  // coord (~one sheet), so the centroid stays on the sheet but is geometrically SMOOTH -- a clean
+  // manifold like a VC3D grown surface, without the front-fragmentation holes. WIND_SMOOTH=N adds an
+  // NxN median filter over the extracted (z,u) coords to remove residual single-pixel jumps.
+  int centroid=1; { const char*e=getenv("WIND_EXTRACT"); if(e&&!strcmp(e,"ridge"))centroid=0; }
+  int smooth=0; { const char*e=getenv("WIND_SMOOTH"); if(e)smooth=atoi(e); if(smooth<0)smooth=0; }
   size_t no=(size_t)dz*UW; float*X=malloc(no*sizeof(float)),*Y=malloc(no*sizeof(float)),*Z=malloc(no*sizeof(float)),*M=malloc(no*sizeof(float));
-  float*best=malloc(no*sizeof(float)); for(size_t i=0;i<no;i++){ X[i]=Y[i]=Z[i]=-1; M[i]=0; best[i]=-1; }
+  double*ax=NULL,*ay=NULL,*az=NULL,*aw=NULL; float*best=NULL;
+  if(centroid){ ax=calloc(no,sizeof(double));ay=calloc(no,sizeof(double));az=calloc(no,sizeof(double));aw=calloc(no,sizeof(double)); }
+  else best=malloc(no*sizeof(float));
+  for(size_t i=0;i<no;i++){ X[i]=Y[i]=Z[i]=-1; M[i]=0; if(best)best[i]=-1; }
   for(int z=0;z<dz;z++)for(int y=0;y<dy;y++)for(int x=0;x<dx;x++){ size_t p=((size_t)z*dy+y)*dx+x;
     float wv=w[p]; if(!isfinite(wv))continue;
     double rc=wv+atan2((double)y-cy,(double)x-cx)/TWO_PI; int u=(int)((rc-wmin)*SAMP); if(u<0||u>=UW)continue;
-    size_t o=(size_t)z*UW+u; if((float)ct[p]>best[o]){ best[o]=ct[p]; X[o]=x0+x; Y[o]=y0+y; Z[o]=z0+z; M[o]=1; } }
+    size_t o=(size_t)z*UW+u;
+    if(centroid){ double cw=ct[p]; if(cw<=0)continue; ax[o]+=cw*(x0+x); ay[o]+=cw*(y0+y); az[o]+=cw*(z0+z); aw[o]+=cw; M[o]=1; }
+    else if((float)ct[p]>best[o]){ best[o]=ct[p]; X[o]=x0+x; Y[o]=y0+y; Z[o]=z0+z; M[o]=1; } }
+  if(centroid){ for(size_t o=0;o<no;o++) if(aw[o]>0){ X[o]=(float)(ax[o]/aw[o]); Y[o]=(float)(ay[o]/aw[o]); Z[o]=(float)(az[o]/aw[o]); }
+    free(ax);free(ay);free(az);free(aw); }
+  if(smooth>0){ // separable-ish NxN median over valid coords, per channel
+    int r=smooth/2; float*tmp=malloc(no*sizeof(float)); float*win=malloc((size_t)(smooth*smooth)*sizeof(float));
+    float*chs[3]={X,Y,Z};
+    for(int c=0;c<3;c++){ float*S=chs[c];
+      for(int z=0;z<dz;z++)for(int u=0;u<UW;u++){ size_t o=(size_t)z*UW+u; if(M[o]<=0){tmp[o]=S[o];continue;}
+        int k=0; for(int dz2=-r;dz2<=r;dz2++)for(int du=-r;du<=r;du++){ int zz=z+dz2,uu=u+du; if(zz<0||uu<0||zz>=dz||uu>=UW)continue;
+          size_t oo=(size_t)zz*UW+uu; if(M[oo]>0)win[k++]=S[oo]; }
+        if(!k){tmp[o]=S[o];continue;} for(int a=1;a<k;a++){float v=win[a];int b=a-1;while(b>=0&&win[b]>v){win[b+1]=win[b];b--;}win[b+1]=v;}
+        tmp[o]=win[k/2]; }
+      for(size_t o=0;o<no;o++) S[o]=tmp[o]; }
+    free(tmp);free(win); }
+  // WIND_SNAP=R: hybrid sharpen. The smooth centroid gives a clean manifold POSITION but blurs CT
+  // across the sheet thickness. Snap each point along the radial (umbilicus-outward) normal within
+  // +/-R lod-voxels to the brightest CT voxel -- restores the sharp sheet centerline without
+  // reintroducing the max-ridge's lateral jumpiness (the search is confined to the normal line).
+  int snap=0; { const char*e=getenv("WIND_SNAP"); if(e)snap=atoi(e); if(snap<0)snap=0; }
+  if(snap>0){ long moved=0;
+    for(size_t o=0;o<no;o++){ if(M[o]<=0)continue;
+      double yi=Y[o]-y0, xi=X[o]-x0; int zi=(int)lround(Z[o]-z0);
+      double ry=yi-cy, rx=xi-cx, rn=sqrt(ry*ry+rx*rx); if(rn<1e-6||zi<0||zi>=dz)continue; ry/=rn; rx/=rn;
+      double bestv=-1, bt=0;
+      for(double t=-snap;t<=snap;t+=0.5){ int yy=(int)lround(yi+t*ry), xx=(int)lround(xi+t*rx);
+        if(yy<0||xx<0||yy>=dy||xx>=dx)continue; double cv=ct[((size_t)zi*dy+yy)*dx+xx]; if(cv>bestv){bestv=cv;bt=t;} }
+      if(bt!=0){ Y[o]=(float)(y0+yi+bt*ry); X[o]=(float)(x0+xi+bt*rx); moved++; } }
+    fprintf(stderr,"snap R=%d: moved %ld points to radial CT ridge\n",snap,moved); }
   free(ct);
   long filled=0; for(size_t i=0;i<no;i++) filled+=(M[i]>0);
-  fprintf(stderr,"filled %ld/%zu pixels (%.1f%%)\n",filled,no,100.0*filled/no);
+  fprintf(stderr,"extract=%s smooth=%d  filled %ld/%zu pixels (%.1f%%)\n",centroid?"centroid":"ridge",smooth,filled,no,100.0*filled/no);
 
   if(wtif(outdir,"x",X,UW,dz)||wtif(outdir,"y",Y,UW,dz)||wtif(outdir,"z",Z,UW,dz)||wtif(outdir,"mask",M,UW,dz)){
     fprintf(stderr,"tif write fail (does %s exist?)\n",outdir); return 1; }
@@ -76,5 +116,5 @@ int main(int argc,char**argv){
   if(mf){ fprintf(mf,"{\n  \"type\":\"seg\", \"source\":\"taberna wind_tifxyz\",\n  \"width\":%d, \"height\":%d, \"lod\":%d,\n  \"region\":[%d,%d,%d, %d,%d,%d],\n  \"render_coord\":[%.3f,%.3f]\n}\n",
       UW,dz,lod,z0,y0,x0,dz,dy,dx,wmin,wmax); fclose(mf); }
   fprintf(stderr,"wrote %s/{x,y,z,mask}.tif + meta.json (%dx%d)\n",outdir,UW,dz);
-  free(w);free(best);free(X);free(Y);free(Z);free(M); return 0;
+  free(w);if(best)free(best);free(X);free(Y);free(Z);free(M); return 0;
 }

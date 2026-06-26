@@ -111,6 +111,10 @@ int main(int argc,char**argv){
     fprintf(stderr,"FINE render: CT %s scale %d, fine region z%d y%d x%d + %dx%dx%d -> %d cols x %d rows\n",
             ctarc,scale,Fz0,Fy0,Fx0,Fdz,Fdy,Fdx,UW,Fdz);
     u8*ct=mca_read(h,0,Fz0,Fy0,Fx0,Fdz,Fdy,Fdx); if(!ct){ fprintf(stderr,"fine CT read fail\n"); return 1; }
+    // composite across the radial (across-sheet) voxels that land in one (zf,u) column. MEAN blends the
+    // sheet center with the darker partial-volume voxels on either side -> faint streaks; MAX keeps the
+    // densest voxel = the sheet centerline -> a sharper surface. UNROLL_COMPOSITE=max selects it.
+    int cmax=0; { const char*e=getenv("UNROLL_COMPOSITE"); if(e&&!strcmp(e,"max"))cmax=1; }
     double*acc=calloc((size_t)Fdz*UW,sizeof(double)); int*cnt=calloc((size_t)Fdz*UW,sizeof(int));
     // parallel over zf: each zf writes a disjoint output row [zf*UW,(zf+1)*UW) -> no atomics needed
     // LOD half-voxel registration: a winding (L2) voxel center sits at fine coord scale*j+(scale-1)/2,
@@ -124,9 +128,10 @@ int main(int argc,char**argv){
           double wv=wtrilin(w,dz,dy,dx,wlz,wly,wlx); if(!isfinite(wv))continue;
           double rc=wv+wsign*atan2(wly-cy,wlx-cx)/TWO_PI;
           int u=(int)((rc-wmin)*SAMP); if(u<0||u>=UW)continue;
-          size_t o=(size_t)zf*UW+u; acc[o]+=ct[((size_t)zf*Fdy+yf)*Fdx+xf]; cnt[o]++; } } }
+          size_t o=(size_t)zf*UW+u; double cv=ct[((size_t)zf*Fdy+yf)*Fdx+xf];
+          if(cmax){ if(cv>acc[o])acc[o]=cv; } else acc[o]+=cv; cnt[o]++; } } }
     u8*img=calloc((size_t)Fdz*UW,1);
-    for(size_t i=0;i<(size_t)Fdz*UW;i++) if(cnt[i]) img[i]=(u8)(acc[i]/cnt[i]);
+    for(size_t i=0;i<(size_t)Fdz*UW;i++) if(cnt[i]) img[i]=(u8)(cmax?acc[i]:acc[i]/cnt[i]);
     FILE*o=fopen(outp,"wb"); if(!o){ fprintf(stderr,"write %s fail\n",outp); return 1; }
     fprintf(o,"P5\n%d %d\n255\n",UW,Fdz); fwrite(img,1,(size_t)Fdz*UW,o); fclose(o);
     fprintf(stderr,"wrote %s (%dx%d)\n",outp,UW,Fdz);
